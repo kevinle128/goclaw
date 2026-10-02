@@ -159,9 +159,8 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 				p1, err1 := ps.IsPaired(ctx, userID, c.Name())
 				p2, err2 := ps.IsPaired(ctx, senderID, c.Name())
 				if err1 != nil || err2 != nil {
-					slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+					slog.Warn("security.pairing_check_failed, denying access (fail-closed)",
 						"user_id", userID, "channel", c.Name(), "err1", err1, "err2", err2)
-					paired = true
 				} else {
 					paired = p1 || p2
 				}
@@ -265,9 +264,8 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 					groupSenderID := fmt.Sprintf("group:%d", chatID)
 					paired, pairErr := c.PairingService().IsPaired(ctx, groupSenderID, c.Name())
 					if pairErr != nil {
-						slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+						slog.Warn("security.pairing_check_failed, denying access (fail-closed)",
 							"group_sender", groupSenderID, "channel", c.Name(), "error", pairErr)
-						paired = true
 					}
 					if paired {
 						c.MarkGroupApproved(chatIDStr)
@@ -320,9 +318,8 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 					groupSenderID := fmt.Sprintf("group:%d", chatID)
 					paired, pairErr := c.PairingService().IsPaired(ctx, groupSenderID, c.Name())
 					if pairErr != nil {
-						slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+						slog.Warn("security.pairing_check_failed, denying access (fail-closed)",
 							"group_sender", groupSenderID, "channel", c.Name(), "error", pairErr)
-						paired = true
 					}
 					if paired {
 						c.MarkGroupApproved(chatIDStr)
@@ -376,9 +373,8 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 			groupSenderID := fmt.Sprintf("group:%d", chatID)
 			paired, err := c.PairingService().IsPaired(ctx, groupSenderID, c.Name())
 			if err != nil {
-				slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+				slog.Warn("security.pairing_check_failed, denying access (fail-closed)",
 					"group_sender", groupSenderID, "channel", c.Name(), "error", err)
-				paired = true
 			}
 			if paired {
 				c.MarkGroupApproved(chatIDStr)
@@ -473,22 +469,13 @@ func (c *Channel) processResolvedMessage(ctx context.Context, rctx resolvedMessa
 			m := &mediaList[i]
 			switch m.Type {
 			case "audio", "voice":
-				var transcript string
-				var sttErr error
-				if c.audioMgr != nil {
-					sttCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-					res, err := c.audioMgr.Transcribe(sttCtx, audio.STTInput{FilePath: m.FilePath, MimeType: "audio/ogg"}, audio.STTOptions{})
-					cancel()
-					if err == nil && res != nil {
-						transcript = res.Text
-					} else {
-						sttErr = err
-					}
-				}
+				transcript, sttErr := c.transcribeMediaAudio(ctx, *m)
 				if sttErr != nil {
 					slog.Warn("telegram: STT transcription failed",
-						"type", m.Type, "error", sttErr)
-				} else {
+						"type", m.Type,
+						"mime", telegramAudioSTTMime(m.ContentType),
+						"error", sttErr)
+				} else if transcript != "" {
 					m.Transcript = transcript
 				}
 			case "document":
@@ -725,4 +712,35 @@ func (c *Channel) processResolvedMessage(ctx context.Context, rctx resolvedMessa
 	if rctx.isGroup {
 		c.GroupHistory().Clear(rctx.localKey)
 	}
+}
+
+func (c *Channel) transcribeMediaAudio(ctx context.Context, m MediaInfo) (string, error) {
+	if c.audioMgr == nil {
+		return "", nil
+	}
+
+	sttCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	sttCtx = audio.WithChannel(sttCtx, c.Type())
+
+	res, err := c.audioMgr.Transcribe(sttCtx, audio.STTInput{
+		FilePath: m.FilePath,
+		MimeType: telegramAudioSTTMime(m.ContentType),
+		Filename: m.FileName,
+	}, audio.STTOptions{})
+	if err != nil {
+		return "", err
+	}
+	if res == nil || strings.TrimSpace(res.Text) == "" {
+		return "", nil
+	}
+	return res.Text, nil
+}
+
+func telegramAudioSTTMime(contentType string) string {
+	mime := strings.TrimSpace(contentType)
+	if mime == "" || strings.EqualFold(mime, "application/octet-stream") {
+		return "audio/ogg"
+	}
+	return mime
 }

@@ -57,6 +57,7 @@ func (l *Loop) pipelineCallbacks(req *RunRequest, bridgeRS *runState) pipelineCa
 		executeToolCall:    l.makeExecuteToolCall(req, bridgeRS),
 		executeToolRaw:     l.makeExecuteToolRaw(req),
 		processToolResult:  l.makeProcessToolResult(req, bridgeRS),
+		authorizeToolCall:  l.makeAuthorizeToolCall(),
 		checkReadOnly:      l.makeCheckReadOnly(req, bridgeRS),
 		sanitizeContent:    SanitizeAssistantContent,
 		flushMessages:      l.makeFlushMessages(req),
@@ -85,6 +86,7 @@ type pipelineCallbackSet struct {
 	executeToolCall    func(ctx context.Context, state *pipeline.RunState, tc providers.ToolCall) ([]providers.Message, error)
 	executeToolRaw     func(ctx context.Context, tc providers.ToolCall) (providers.Message, any, error)
 	processToolResult  func(ctx context.Context, state *pipeline.RunState, tc providers.ToolCall, rawMsg providers.Message, rawData any) []providers.Message
+	authorizeToolCall  func(ctx context.Context, state *pipeline.RunState, tc providers.ToolCall) (bool, string)
 	checkReadOnly      func(state *pipeline.RunState) (*providers.Message, bool)
 	sanitizeContent    func(string) string
 	flushMessages      func(ctx context.Context, sessionKey string, msgs []providers.Message) error
@@ -133,7 +135,7 @@ func (l *Loop) makeBuildMessages() func(ctx context.Context, input *pipeline.Run
 			input.Message, input.ExtraSystemPrompt,
 			input.SessionKey, input.Channel, input.ChannelType,
 			input.BitrixPortalDomain,
-			input.ChatTitle, input.ChatID, input.PeerKind, input.UserID,
+			input.ChatTitle, input.ChatID, input.PeerKind, input.UserID, input.SenderName,
 			input.HistoryLimit, input.SkillFilter, input.LightContext)
 		return msgs, nil
 	}
@@ -227,6 +229,22 @@ func (l *Loop) makeBuildFilteredTools(req *RunRequest) func(state *pipeline.RunS
 		allMsgs := state.Messages.All()
 		toolDefs, _, returnedMsgs := l.buildFilteredTools(req, state.Context.HadBootstrap,
 			state.Iteration, maxIter, allMsgs)
+		if state.Iteration != maxIter && len(userTools) > 0 {
+			existing := make(map[string]struct{}, len(toolDefs)+len(userTools))
+			for _, td := range toolDefs {
+				if td.Function != nil {
+					existing[td.Function.Name] = struct{}{}
+				}
+			}
+			for _, t := range userTools {
+				name := t.Name()
+				if _, ok := existing[name]; ok {
+					continue
+				}
+				toolDefs = append(toolDefs, tools.ToProviderDef(t))
+				existing[name] = struct{}{}
+			}
+		}
 		// buildFilteredTools returns the full messages slice; only messages appended
 		// beyond the original length are injections (e.g. final-iteration hint).
 		// Appending the entire slice would duplicate system+history into pending.
@@ -246,6 +264,44 @@ func (l *Loop) makeBuildFilteredTools(req *RunRequest) func(state *pipeline.RunS
 			"mcp_defs_count", mcpDefs,
 			"iteration", state.Iteration)
 		return toolDefs, nil
+	}
+}
+
+// makeAuthorizeToolCall enforces a runtime fail-closed allowlist check before
+// every tool execution. AllowedTools is keyed by canonical registry names (built
+// by ThinkStage from FilterTools output). The model may emit prefixed names when
+// the agent has toolCallPrefix configured (e.g. "proxy_exec" → canonical "exec"),
+// so we resolve the name to its canonical form before the lookup to avoid a
+// guaranteed miss on every prefixed call.
+func (l *Loop) makeAuthorizeToolCall() func(ctx context.Context, state *pipeline.RunState, tc providers.ToolCall) (bool, string) {
+	return func(_ context.Context, state *pipeline.RunState, tc providers.ToolCall) (bool, string) {
+		allowed := state.Tool.AllowedTools
+		if allowed == nil {
+			// nil allowlist means no per-iteration restriction (e.g. BuildFilteredTools not wired).
+			return true, ""
+		}
+
+		// Resolve to canonical name before allowlist lookup. AllowedTools is keyed
+		// by canonical names; the model may emit prefixed names when toolCallPrefix
+		// is set (e.g. "proxy_exec" vs "exec"). Without this the lookup always misses.
+		name := l.resolveToolCallName(tc.Name)
+
+		if allowed[name] {
+			return true, ""
+		}
+
+		// Preserve lazy activation for deferred tools (typically per-user MCP).
+		if l.tools != nil && l.tools.TryActivateDeferred(name) {
+			// Re-check deny policy to prevent a lazy-activated tool from bypassing
+			// an explicit deny rule.
+			if l.toolPolicy != nil && l.toolPolicy.IsDenied(name, l.agentToolPolicy) {
+				return false, "tool not allowed by policy: " + name
+			}
+			allowed[name] = true
+			return true, ""
+		}
+
+		return false, "tool not allowed by policy: " + name
 	}
 }
 
@@ -301,8 +357,10 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 			}
 		}
 
+		streamThinkingEmitted := false
 		emitChunk := func(chunk providers.StreamChunk) {
 			if chunk.Thinking != "" {
+				streamThinkingEmitted = true
 				emitRun(AgentEvent{
 					Type:    protocol.ChatEventThinking,
 					AgentID: l.id,
@@ -319,6 +377,7 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 				})
 			}
 		}
+		fallbackTraceClassifier := providers.NewDefaultClassifier()
 		callProvider := func(attempt string, request providers.ChatRequest) (*providers.ChatResponse, error) {
 			if fallbackProvider, ok := provider.(*providers.ModelFallbackProvider); ok {
 				before := func(callCtx context.Context, entry providers.FallbackCandidate, actualReq providers.ChatRequest) (providers.FallbackAfterCall, error) {
@@ -329,6 +388,25 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 						return nil, reserveErr
 					}
 					return func(callResp *providers.ChatResponse, callErr error, info providers.FallbackCallInfo) {
+						fallbackMeta := providers.ModelFallbackAttemptMetadata{
+							ProviderName: entry.ProviderName,
+							Model:        actualReq.Model,
+							Status:       "success",
+							Streamed:     info.Streamed,
+						}
+						if callErr != nil {
+							classification := providers.ClassifyHTTPError(fallbackTraceClassifier, callErr)
+							reason := string(classification.Reason)
+							if classification.Kind == "context_overflow" {
+								reason = "context_overflow"
+							}
+							fallbackMeta.Status = "error"
+							fallbackMeta.Reason = reason
+							fallbackMeta.Error = callErr.Error()
+						} else {
+							opts = append(opts, withProvider(entry.ProviderName), withModel(actualReq.Model))
+						}
+						opts = append(opts, withModelFallbackAttempt(fallbackMeta))
 						if reservation != nil {
 							if info.Streamed {
 								reservation.ReconcileStream(callCtx, callResp, callErr, true)
@@ -410,6 +488,15 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 				}())
 		}
 
+		if req.Stream && err == nil && resp != nil && resp.Thinking != "" && !streamThinkingEmitted {
+			emitRun(AgentEvent{
+				Type:    protocol.ChatEventThinking,
+				AgentID: l.id,
+				RunID:   req.RunID,
+				Payload: map[string]string{"content": resp.Thinking},
+			})
+		}
+
 		// Non-streaming: emit content events matching v2 behavior (channels need these).
 		if !req.Stream && err == nil && resp != nil {
 			if resp.Thinking != "" {
@@ -472,6 +559,13 @@ func (l *Loop) makeCompactMessages(req *RunRequest) func(ctx context.Context, ms
 		compacted := l.compactMessagesInPlace(ctx, msgs)
 		if compacted == nil {
 			return msgs, nil // compaction failed, return original
+		}
+		// The compacted slice replaces run history and is persisted verbatim —
+		// repair tool_use/tool_result pairing now so an orphaned role:"tool"
+		// message never reaches the provider (OpenAI rejects it with a 400).
+		compacted, repaired := sanitizeHistory(compacted)
+		if repaired > 0 {
+			slog.Warn("post_compaction_sanitize", "agent", l.id, "repaired", repaired)
 		}
 		// Stamp session metadata with the compaction timestamp so operators
 		// can diagnose compaction cadence without a dedicated column. Stored

@@ -26,8 +26,11 @@ type GrantChecker interface {
 
 // cacheKey identifies a unique agent+user combination for caching.
 type cacheKey struct {
-	agentID uuid.UUID
-	userID  string
+	agentID             uuid.UUID
+	userID              string
+	channelInstanceName string
+	scopeType           string
+	scopeKey            string
 }
 
 // cacheEntry holds the resolved access info for an agent+user.
@@ -46,6 +49,8 @@ type storeGrantChecker struct {
 	cache sync.Map // map[cacheKey]*cacheEntry
 }
 
+const grantCheckerCacheSubscriberID = bus.TopicCacheMCP + ":grant_checker"
+
 // NewStoreGrantChecker creates a GrantChecker backed by the MCP store.
 // Subscribes to TopicCacheMCP for cache invalidation on grant changes.
 func NewStoreGrantChecker(mcpStore store.MCPServerStore, msgBus *bus.MessageBus) *storeGrantChecker {
@@ -56,7 +61,7 @@ func NewStoreGrantChecker(mcpStore store.MCPServerStore, msgBus *bus.MessageBus)
 	// Subscribe to cache invalidation events.
 	// When MCP grants are revoked/modified, the HTTP handler broadcasts to this topic.
 	if msgBus != nil {
-		msgBus.Subscribe(bus.TopicCacheMCP, func(event bus.Event) {
+		msgBus.Subscribe(grantCheckerCacheSubscriberID, func(event bus.Event) {
 			if event.Name == protocol.EventCacheInvalidate {
 				gc.cache.Clear()
 				slog.Debug("mcp.grant_checker.cache_cleared", "trigger", "bus_event")
@@ -75,6 +80,11 @@ func (gc *storeGrantChecker) IsAllowed(ctx context.Context, agentID uuid.UUID, u
 	}
 
 	key := cacheKey{agentID: agentID, userID: userID}
+	if scope, ok := store.ChannelContextScopeFromContext(ctx); ok {
+		key.channelInstanceName = scope.ChannelInstanceName
+		key.scopeType = scope.ScopeType
+		key.scopeKey = scope.ScopeKey
+	}
 
 	// Try cache first
 	if cached, ok := gc.cache.Load(key); ok {

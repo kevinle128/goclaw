@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
@@ -162,6 +163,18 @@ type ChannelDestroyer interface {
 // the gateway-level block_reply setting. Returns nil to inherit the gateway default.
 type BlockReplyChannel interface {
 	BlockReplyEnabled() *bool
+}
+
+// ChatBehaviorChannel is optionally implemented by channels that override
+// gateway-level human-like delivery behavior. Nil means inherit the gateway default.
+type ChatBehaviorChannel interface {
+	ChatBehaviorConfig() *config.ChatBehaviorConfig
+}
+
+// ReasoningDeliveryChannel is optionally implemented by channels that expose
+// how model reasoning should be delivered to end users.
+type ReasoningDeliveryChannel interface {
+	ReasoningDeliveryConfig() (mode string, legacyReasoningStream *bool)
 }
 
 // WebhookChannel extends Channel with an HTTP handler that can be mounted
@@ -340,9 +353,9 @@ func (c *BaseChannel) CheckDMPolicy(ctx context.Context, senderID, dmPolicy stri
 		if c.pairingService != nil {
 			paired, err := c.pairingService.IsPaired(ctx, senderID, c.name)
 			if err != nil {
-				slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+				slog.Warn("security.pairing_check_failed, denying access (fail-closed)",
 					"sender_id", senderID, "channel", c.name, "error", err)
-				return PolicyAllow
+				return PolicyDeny
 			}
 			if paired {
 				return PolicyAllow
@@ -379,9 +392,9 @@ func (c *BaseChannel) CheckGroupPolicy(ctx context.Context, senderID, chatID, gr
 		if c.pairingService != nil {
 			paired, err := c.pairingService.IsPaired(ctx, groupSenderID, c.name)
 			if err != nil {
-				slog.Warn("security.pairing_check_failed, assuming paired (fail-open)",
+				slog.Warn("security.pairing_check_failed, denying access (fail-closed)",
 					"group_sender", groupSenderID, "channel", c.name, "error", err)
-				return PolicyAllow
+				return PolicyDeny
 			}
 			if paired {
 				c.MarkGroupApproved(chatID)

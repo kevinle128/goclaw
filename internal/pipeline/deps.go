@@ -61,10 +61,11 @@ type PipelineDeps struct {
 	InjectReminders  func(ctx context.Context, input *RunInput, msgs []providers.Message) []providers.Message
 
 	// Think callbacks (ThinkStage)
-	BuildFilteredTools  func(state *RunState) ([]providers.ToolDefinition, error)
-	CallLLM             func(ctx context.Context, state *RunState, req providers.ChatRequest) (*providers.ChatResponse, error)
-	UniqueToolCallIDs   func(calls []providers.ToolCall, runID string, iteration int) []providers.ToolCall
-	EmitBlockReply      func(content string) // emit block.reply for intermediate assistant content
+	BuildFilteredTools       func(state *RunState) ([]providers.ToolDefinition, error)
+	CallLLM                  func(ctx context.Context, state *RunState, req providers.ChatRequest) (*providers.ChatResponse, error)
+	UniqueToolCallIDs        func(calls []providers.ToolCall, runID string, iteration int) []providers.ToolCall
+	EmitBlockReply           func(content string)         // emit block.reply for intermediate assistant content
+	EmitBlockReplyWithSource func(content, source string) // emit block.reply with payload source metadata
 
 	// Prune callbacks (PruneStage)
 	PruneMessages   func(msgs []providers.Message, budget int) ([]providers.Message, PruneStats)
@@ -72,10 +73,10 @@ type PipelineDeps struct {
 	CompactMessages func(ctx context.Context, msgs []providers.Message, model string) ([]providers.Message, error)
 
 	// Cache-TTL gate callbacks (Phase 06). All optional (nil = feature disabled).
-	GetProviderCaps  func() providers.ProviderCapabilities  // provider capabilities for cache detection
-	GetPruningConfig func() *config.ContextPruningConfig    // pruning config (TTL field)
-	GetCacheTouch    func(sessionKey string) time.Time      // per-session last prune-mutation timestamp
-	MarkCacheTouched func(sessionKey string)                // record mutation timestamp AFTER prune mutates
+	GetProviderCaps  func() providers.ProviderCapabilities // provider capabilities for cache detection
+	GetPruningConfig func() *config.ContextPruningConfig   // pruning config (TTL field)
+	GetCacheTouch    func(sessionKey string) time.Time     // per-session last prune-mutation timestamp
+	MarkCacheTouched func(sessionKey string)               // record mutation timestamp AFTER prune mutates
 
 	// Memory flush callbacks (MemoryFlushStage, invoked by PruneStage)
 	RunMemoryFlush func(ctx context.Context, state *RunState) error
@@ -89,10 +90,16 @@ type PipelineDeps struct {
 	ExecuteToolRaw func(ctx context.Context, tc providers.ToolCall) (providers.Message, any, error)
 	// ProcessToolResult processes a raw tool result with state mutation (sequential only).
 	ProcessToolResult func(ctx context.Context, state *RunState, tc providers.ToolCall, rawMsg providers.Message, rawData any) []providers.Message
+	// AuthorizeToolCall validates whether a tool call is allowed to execute.
+	// Used by ToolStage as a runtime guard against out-of-policy tool calls.
+	AuthorizeToolCall func(ctx context.Context, state *RunState, tc providers.ToolCall) (bool, string)
 	// SequentialToolCall returns true for tools that must preserve same-response order.
 	// When any tool call in a batch matches, ToolStage uses ExecuteToolCall for the
 	// whole batch instead of parallel raw execution.
 	SequentialToolCall func(tc providers.ToolCall) bool
+	// ParallelEligibleToolCall returns true when a tool call is safe to execute
+	// through the parallel raw I/O path. Nil = no parallel raw execution.
+	ParallelEligibleToolCall func(tc providers.ToolCall) bool
 	// CheckReadOnly checks read-only streak. Returns warning message (if any) and whether to break.
 	CheckReadOnly func(state *RunState) (*providers.Message, bool)
 
@@ -107,11 +114,11 @@ type PipelineDeps struct {
 	// response to workspace disk, appends MediaRefs, and clears inline base64.
 	// Called BEFORE building the assistant message for session persistence.
 	// nil = feature disabled (no Codex image gen or no workspace).
-	PersistAssistantImages   func(msg *providers.Message, workspace string)
-	SkillPostscript          func(ctx context.Context, content string, totalToolCalls int) string // skill evolution nudge (nil = disabled)
-	SanitizeContent          func(content string) string
-	StripMessageDirectives   func(content string) string
-	DeduplicateMediaSuffix   func(content, suffix string) string
+	PersistAssistantImages func(msg *providers.Message, workspace string)
+	SkillPostscript        func(ctx context.Context, content string, totalToolCalls int) string // skill evolution nudge (nil = disabled)
+	SanitizeContent        func(content string) string
+	StripMessageDirectives func(content string) string
+	DeduplicateMediaSuffix func(content, suffix string) string
 	IsSilentReply          func(content string) bool
 	EmitSessionCompleted   func(ctx context.Context, sessionKey string, msgCount, tokensUsed, compactionCount int)
 	UpdateMetadata         func(ctx context.Context, sessionKey string, usage providers.Usage) error

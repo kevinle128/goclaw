@@ -88,11 +88,14 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 			cronCtx = store.WithCredentialUserID(cronCtx, job.Payload.CredentialUserID)
 		}
 
-		// Reset session before each cron run to prevent tool errors from previous
-		// runs from polluting the context and blocking future executions (#294).
-		// Save() persists the empty session to DB so stale data won't reload after restart.
-		// Stateless jobs skip this — they intentionally carry no session history.
-		if !job.Stateless {
+		// Stateless jobs explicitly reset their session before each run — they
+		// carry no history between executions, matching the "Stateless" UI label
+		// and statelessHelp ("each run starts fresh without loading previous
+		// messages"). Stateful (non-stateless) jobs keep prior turns to enable
+		// multi-run dialog.
+		// Save() persists the empty session to DB so stale data won't reload
+		// after restart (#294).
+		if job.Stateless && sessionMgr != nil {
 			sessionMgr.Reset(cronCtx, sessionKey)
 			sessionMgr.Save(cronCtx, sessionKey)
 		}
@@ -128,16 +131,26 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 
 		// If job wants delivery to a channel, send the agent response to the target chat.
 		if job.Deliver && job.DeliverChannel != "" && job.DeliverTo != "" {
-			outMsg := bus.OutboundMessage{
-				Channel: job.DeliverChannel,
-				ChatID:  job.DeliverTo,
-				Content: result.Content,
+			if cronOutputContainsNoReplySentinel(result.Content) {
+				slog.Info("cron: suppressed delivery because output contained NO_REPLY",
+					"job_id", job.ID,
+					"job_name", job.Name,
+					"channel", job.DeliverChannel,
+					"to", job.DeliverTo,
+					"content_len", len(result.Content),
+				)
+			} else {
+				outMsg := bus.OutboundMessage{
+					Channel: job.DeliverChannel,
+					ChatID:  job.DeliverTo,
+					Content: result.Content,
+				}
+				if peerKind == "group" {
+					outMsg.Metadata = map[string]string{"group_id": job.DeliverTo}
+				}
+				appendMediaToOutbound(&outMsg, result.Media)
+				msgBus.PublishOutbound(outMsg)
 			}
-			if peerKind == "group" {
-				outMsg.Metadata = map[string]string{"group_id": job.DeliverTo}
-			}
-			appendMediaToOutbound(&outMsg, result.Media)
-			msgBus.PublishOutbound(outMsg)
 		} else if job.Deliver {
 			slog.Warn("cron: delivery configured but channel/chatID missing — output discarded",
 				"job_id", job.ID, "job_name", job.Name, "channel", job.DeliverChannel, "to", job.DeliverTo)
@@ -159,6 +172,10 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 
 		return cronResult, nil
 	}
+}
+
+func cronOutputContainsNoReplySentinel(content string) bool {
+	return agent.IsSilentReply(content)
 }
 
 // resolveCronPeerKind infers peer kind from the cron job's user ID.

@@ -351,6 +351,11 @@ Standard OpenAI-compatible provider targeting the Alibaba Coding API.
 
 - **Default model**: `qwen3.5-plus`
 - **Base URL**: `https://coding-intl.dashscope.aliyuncs.com/v1`
+- **Catalog source**: hardcoded because the Coding API does not expose a standard `/v1/models` endpoint
+
+| Model | Display name | Capabilities |
+|-------|--------------|--------------|
+| `qwen3.7-plus` | Qwen 3.7 Plus | Text Generation, Deep Thinking, Visual Understanding |
 
 ---
 
@@ -554,7 +559,7 @@ ClaudeCLIProvider can be configured in `config.json`:
 }
 ```
 
-Or via database `llm_providers` table with `provider_type = "claude_cli"`.
+Or via database `llm_providers` table with `provider_type = "claude_cli"`. For database providers, `api_base` is the CLI executable selector (`"claude"` or an absolute binary path), not an HTTP base URL, so provider URL SSRF opt-ins do not apply to Claude CLI.
 
 ### Session Management
 
