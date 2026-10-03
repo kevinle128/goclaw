@@ -56,6 +56,9 @@ sequenceDiagram
 
 The first request from a client must be `connect`. Any other method sent before authentication results in an `UNAUTHORIZED` error.
 
+The ACP adapter uses additive reservation and tool-capability fields on this protocol.
+See [25 — ACP Server](25-acp-server.md) for the supported contract and lifecycle.
+
 ### Request Frame Structure
 
 - `type`: always `"req"`

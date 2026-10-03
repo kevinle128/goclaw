@@ -192,7 +192,10 @@ The main `goclaw` binary can also inspect local or remote gateways:
 goclaw traces list --status error
 goclaw traces get <trace-id> -o json
 goclaw --server https://goclaw.example.com --token "$GOCLAW_GATEWAY_TOKEN" traces follow --session <session-key>
+GOCLAW_ACP_API_KEY="$KEY" goclaw --server ws://127.0.0.1:18790 acp --agent coding-agent --owner user-123 --tenant "$TENANT_ID" --workspace-root "$PWD" --mcp-exec-root /usr/local/bin
 ```
+
+See [ACP Server](docs/25-acp-server.md) for Buzz integration, authentication, MCP isolation, and lifecycle details.
 
 **Optional services** — enable with `WITH_*` flags:
 

@@ -47,6 +47,10 @@ const (
 	MethodConnect = "connect"
 	MethodHealth  = "health"
 	MethodStatus  = "status"
+
+	MethodACPToolsRegister = "acp.tools.register"
+	MethodACPToolsResult   = "acp.tools.result"
+	MethodACPToolsRelease  = "acp.tools.release"
 )
 
 // Phase 2 - NEEDED methods

@@ -128,6 +128,9 @@ func TestCanAccess_WriteMethods(t *testing.T) {
 		protocol.MethodSessionsDelete,
 		protocol.MethodSessionsCompact,
 		protocol.MethodCronCreate,
+		protocol.MethodACPToolsRegister,
+		protocol.MethodACPToolsResult,
+		protocol.MethodACPToolsRelease,
 	}
 	for _, method := range writeMethods {
 		t.Run(method, func(t *testing.T) {

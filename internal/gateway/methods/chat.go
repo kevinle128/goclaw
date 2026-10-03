@@ -3,11 +3,13 @@ package methods
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/google/uuid"
 
 	"log/slog"
 
+	"github.com/nextlevelbuilder/goclaw/internal/acpbridge"
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/audio"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
@@ -35,6 +37,7 @@ type ChatMethods struct {
 	audioMgr    *audio.Manager // for TTS auto-apply on WS responses (nil = disabled)
 	usageCaps   *usagecaps.Service
 	debouncer   *chatDebouncer
+	acpManager  *acpbridge.Manager
 }
 
 func NewChatMethods(agents *agent.Router, sess store.SessionStore, cfg *config.Config, rl *gateway.RateLimiter, eventBus bus.EventPublisher) *ChatMethods {
@@ -55,6 +58,17 @@ func (m *ChatMethods) SetUsageCapService(s *usagecaps.Service) {
 // SetPostTurnProcessor sets the post-turn processor for team task dispatch.
 func (m *ChatMethods) SetPostTurnProcessor(pt tools.PostTurnProcessor) {
 	m.postTurn = pt
+}
+
+func (m *ChatMethods) SetACPManager(manager *acpbridge.Manager) { m.acpManager = manager }
+
+func (m *ChatMethods) DiscardACPConnection(connectionID string) {
+	if m.debouncer == nil {
+		return
+	}
+	for _, discarded := range m.debouncer.DiscardConnection(connectionID) {
+		discarded.releaseReservation()
+	}
 }
 
 // Register adds chat methods to the router.
@@ -111,11 +125,13 @@ type chatMediaItem struct {
 }
 
 type chatSendParams struct {
-	Message    string          `json:"message"`
-	AgentID    string          `json:"agentId"`
-	SessionKey string          `json:"sessionKey"`
-	Stream     bool            `json:"stream"`
-	Media      json.RawMessage `json:"media,omitempty"` // []string (legacy) or []chatMediaItem
+	Message       string          `json:"message"`
+	AgentID       string          `json:"agentId"`
+	SessionKey    string          `json:"sessionKey"`
+	Stream        bool            `json:"stream"`
+	Media         json.RawMessage `json:"media,omitempty"` // []string (legacy) or []chatMediaItem
+	ACPGeneration uint64          `json:"acpGeneration,omitempty"`
+	TerminalMode  string          `json:"terminalMode,omitempty"`
 }
 
 // parseMedia handles both legacy string paths and new {path,filename} objects.
@@ -209,12 +225,30 @@ func (m *ChatMethods) handleSend(ctx context.Context, client *gateway.Client, re
 		userID:     userID,
 		sessionKey: sessionKey,
 	}
+	if params.ACPGeneration > 0 {
+		if m.acpManager == nil {
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, "ACP tools are unavailable"))
+			return
+		}
+		lease, err := m.acpManager.Acquire(client.ID(), sessionKey, params.ACPGeneration)
+		if err != nil && !errors.Is(err, acpbridge.ErrNotFound) {
+			client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, err.Error()))
+			return
+		}
+		if err == nil {
+			item.capabilityLease = lease
+		}
+		item.effectFence = &agent.RunEffectFence{}
+		item.ownerConnectionID = client.ID()
+	}
 	debounceKey := chatDebounceKey(userID, sessionKey)
 	if m.debouncer == nil {
 		m.debouncer = newChatDebouncer(m.dispatchChatSends)
 	}
 	if m.agents.IsSessionBusy(sessionKey) && agent.IsExactCancelKeyword(params.Message) {
-		m.debouncer.Discard(debounceKey)
+		for _, discarded := range m.debouncer.Discard(debounceKey) {
+			discarded.releaseReservation()
+		}
 		m.abortChatSession(req.ID, client, sessionKey)
 		return
 	}
@@ -252,6 +286,9 @@ func (m *ChatMethods) dispatchChatSends(requests []chatSendRequest) {
 		return
 	}
 	primary := requests[len(requests)-1]
+	for i := range len(requests) - 1 {
+		requests[i].releaseReservation()
+	}
 	params := mergeChatSendRequests(requests)
 	sessionKey := primary.sessionKey
 	userID := primary.userID
@@ -265,6 +302,7 @@ func (m *ChatMethods) dispatchChatSends(requests []chatSendRequest) {
 			UserID:  userID,
 		})
 		if injected {
+			primary.releaseReservation()
 			sendChatOK(requests, map[string]any{"injected": true})
 			return
 		}
@@ -286,7 +324,7 @@ func (m *ChatMethods) dispatchChatSends(requests []chatSendRequest) {
 	// Create cancellable context for abort support (matching TS AbortController pattern).
 	runCtx, cancel := context.WithCancel(runCtxBase)
 	runID := uuid.NewString()
-	injectCh := m.agents.RegisterRun(runCtxBase, runID, sessionKey, params.AgentID, cancel)
+	injectCh := m.agents.RegisterOwnedRun(runCtxBase, runID, sessionKey, params.AgentID, primary.ownerConnectionID, primary.effectFence, cancel)
 
 	// Run agent asynchronously - events are broadcast via the event system
 	go func() {
@@ -324,22 +362,29 @@ func (m *ChatMethods) dispatchChatSends(requests []chatSendRequest) {
 		}
 
 		result, err := loop.Run(runCtx, agent.RunRequest{
-			SessionKey:      sessionKey,
-			Message:         message,
-			Media:           mediaFiles,
-			Channel:         "ws",
-			ChatID:          userID, // use stable userID for team/workspace isolation (not ephemeral client.ID())
-			WorkspaceChatID: userID, // mirror ChatID so vault chat_id isolation activates for WS direct flow
-			RunID:           runID,
-			UserID:          userID,
-			Stream:          params.Stream,
-			InjectCh:        injectCh,
+			SessionKey:        sessionKey,
+			Message:           message,
+			Media:             mediaFiles,
+			Channel:           "ws",
+			ChatID:            userID, // use stable userID for team/workspace isolation (not ephemeral client.ID())
+			WorkspaceChatID:   userID, // mirror ChatID so vault chat_id isolation activates for WS direct flow
+			RunID:             runID,
+			UserID:            userID,
+			Stream:            params.Stream,
+			ACPGeneration:     params.ACPGeneration,
+			CapabilityLease:   primary.capabilityLease,
+			EffectFence:       primary.effectFence,
+			OwnerConnectionID: primary.ownerConnectionID,
+			InjectCh:          injectCh,
 			// Wire trace ID back to the active run so force-abort can mark the
 			// correct trace as cancelled if the goroutine does not exit within 3s.
 			OnTraceCreated: func(traceID uuid.UUID) {
 				m.agents.SetRunTraceID(runID, traceID)
 			},
 		})
+		if primary.effectFence != nil && primary.effectFence.Closed() {
+			return
+		}
 
 		if err != nil {
 			// Send cancelled response so the frontend's chat.send promise resolves
@@ -555,6 +600,18 @@ func (m *ChatMethods) handleAbort(ctx context.Context, client *gateway.Client, r
 	if params.SessionKey == "" && params.RunID != "" && !canSeeAll(client.Role(), m.cfg.Gateway.OwnerIDs, client.UserID()) {
 		client.SendResponse(protocol.NewErrorResponse(req.ID, protocol.ErrInvalidRequest, i18n.T(locale, i18n.MsgRequired, "sessionKey")))
 		return
+	}
+	// ACP reservations exist before debounce and before the session is persisted.
+	// Remove the exact owner/session queue before the normal store ownership check.
+	if params.RunID == "" && params.SessionKey != "" && m.debouncer != nil {
+		discarded := m.debouncer.Take(chatDebounceKey(client.UserID(), params.SessionKey))
+		if len(discarded) > 0 {
+			for i := range discarded {
+				discarded[i].releaseReservation()
+			}
+			client.SendResponse(protocol.NewOKResponse(req.ID, map[string]any{"ok": true, "aborted": true, "stopped": true, "runIds": []string{}}))
+			return
+		}
 	}
 
 	// Ownership check: non-admin users can only abort their own sessions.

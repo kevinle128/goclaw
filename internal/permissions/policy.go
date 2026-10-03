@@ -327,6 +327,9 @@ func isWriteMethod(method string) bool {
 		protocol.MethodPairingRequest,
 		protocol.MethodApprovalsApprove,
 		protocol.MethodApprovalsDeny,
+		protocol.MethodACPToolsRegister,
+		protocol.MethodACPToolsResult,
+		protocol.MethodACPToolsRelease,
 
 		// TTS synthesis — invokes provider API (quota/credentials).
 		protocol.MethodTTSConvert,

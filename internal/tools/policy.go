@@ -125,6 +125,9 @@ func (pe *PolicyEngine) FilterTools(
 	denyCaps := pe.denyCapabilities
 	capReg := pe.registry
 	pe.mu.RUnlock()
+	if concrete, ok := registry.(*Registry); ok {
+		capReg = concrete
+	}
 	if len(denyCaps) > 0 && capReg != nil {
 		allowed = filterByCapability(allowed, denyCaps, capReg)
 	}

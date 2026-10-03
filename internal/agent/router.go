@@ -44,14 +44,14 @@ type TraceCollector interface {
 // Each agent has a unique ID and its own provider/model/tools config.
 // Cached Loops expire after TTL (safety net for multi-instance).
 type Router struct {
-	agents          map[string]*agentEntry
-	mu              sync.RWMutex
-	activeRuns      sync.Map     // runID → *ActiveRun
-	sessionRuns     sync.Map     // sessionKey → runID (secondary index for O(1) IsSessionBusy)
-	agentActivity   sync.Map     // sessionKey → *AgentActivityStatus
-	resolver        ResolverFunc // optional: lazy creation from DB
-	ttl             time.Duration
-	traceCollector  TraceCollector // optional: for force-marking aborted traces
+	agents         map[string]*agentEntry
+	mu             sync.RWMutex
+	activeRuns     sync.Map     // runID → *ActiveRun
+	sessionRuns    sync.Map     // sessionKey → runID (secondary index for O(1) IsSessionBusy)
+	agentActivity  sync.Map     // sessionKey → *AgentActivityStatus
+	resolver       ResolverFunc // optional: lazy creation from DB
+	ttl            time.Duration
+	traceCollector TraceCollector // optional: for force-marking aborted traces
 }
 
 func NewRouter() *Router {
@@ -251,16 +251,18 @@ func (r *Router) GetCached(ctx context.Context, agentID string) (Agent, bool) {
 // ActiveRun tracks a running agent invocation so it can be aborted via chat.abort
 // and supports mid-run message injection via InjectCh.
 type ActiveRun struct {
-	RunID      string
-	SessionKey string
-	AgentID    string
-	Cancel     context.CancelFunc
-	StartedAt  time.Time
-	InjectCh   chan InjectedMessage // buffered channel for mid-run user message injection
-	Done       chan struct{}        // closed when goroutine actually exits (via UnregisterRun)
-	State      atomic.Int32        // 0=running, 1=aborting, 2=done
-	TraceID    uuid.UUID           // set after trace creation via SetRunTraceID
-	TenantID   uuid.UUID           // captured at RegisterRun for forceMarkTraceAborted
+	RunID             string
+	SessionKey        string
+	AgentID           string
+	Cancel            context.CancelFunc
+	StartedAt         time.Time
+	InjectCh          chan InjectedMessage // buffered channel for mid-run user message injection
+	Done              chan struct{}        // closed when goroutine actually exits (via UnregisterRun)
+	State             atomic.Int32         // 0=running, 1=aborting, 2=done
+	TraceID           uuid.UUID            // set after trace creation via SetRunTraceID
+	TenantID          uuid.UUID            // captured at RegisterRun for forceMarkTraceAborted
+	OwnerConnectionID string
+	EffectFence       *RunEffectFence
 }
 
 // AbortResult describes the outcome of a single AbortRun call.
@@ -289,16 +291,22 @@ func safeClose(ch chan struct{}) {
 // ctx is used to capture the tenant ID for forceMarkTraceAborted.
 // Returns a receive-only channel for mid-run message injection.
 func (r *Router) RegisterRun(ctx context.Context, runID, sessionKey, agentID string, cancel context.CancelFunc) <-chan InjectedMessage {
+	return r.RegisterOwnedRun(ctx, runID, sessionKey, agentID, "", nil, cancel)
+}
+
+func (r *Router) RegisterOwnedRun(ctx context.Context, runID, sessionKey, agentID, ownerConnectionID string, fence *RunEffectFence, cancel context.CancelFunc) <-chan InjectedMessage {
 	injectCh := make(chan InjectedMessage, injectBufferSize)
 	r.activeRuns.Store(runID, &ActiveRun{
-		RunID:      runID,
-		SessionKey: sessionKey,
-		AgentID:    agentID,
-		Cancel:     cancel,
-		StartedAt:  time.Now(),
-		InjectCh:   injectCh,
-		Done:       make(chan struct{}),
-		TenantID:   store.TenantIDFromContext(ctx),
+		RunID:             runID,
+		SessionKey:        sessionKey,
+		AgentID:           agentID,
+		Cancel:            cancel,
+		StartedAt:         time.Now(),
+		InjectCh:          injectCh,
+		Done:              make(chan struct{}),
+		TenantID:          store.TenantIDFromContext(ctx),
+		OwnerConnectionID: ownerConnectionID,
+		EffectFence:       fence,
 	})
 	r.sessionRuns.Store(sessionKey, runID)
 	return injectCh
@@ -367,11 +375,31 @@ func (r *Router) AbortRun(runID, sessionKey string) AbortResult {
 	case <-run.Done:
 		res.Stopped = true
 	case <-time.After(abortGraceTimeout):
+		if run.EffectFence != nil {
+			run.EffectFence.Close()
+		}
 		// Goroutine is stuck; force trace status so the UI does not hang.
 		r.forceMarkTraceAborted(runID)
 		res.Forced = true
 	}
 	return res
+}
+
+// AbortAndAwaitConnection stops all work admitted by one client connection.
+func (r *Router) AbortAndAwaitConnection(connectionID string) []AbortResult {
+	var owned []*ActiveRun
+	r.activeRuns.Range(func(_, value any) bool {
+		run := value.(*ActiveRun)
+		if run.OwnerConnectionID == connectionID {
+			owned = append(owned, run)
+		}
+		return true
+	})
+	results := make([]AbortResult, 0, len(owned))
+	for _, run := range owned {
+		results = append(results, r.AbortRun(run.RunID, run.SessionKey))
+	}
+	return results
 }
 
 // forceMarkTraceAborted marks a trace as cancelled in DB when the 3s grace

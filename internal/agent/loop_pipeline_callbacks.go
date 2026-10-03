@@ -36,6 +36,7 @@ func (l *Loop) pipelineCallbacks(req *RunRequest, bridgeRS *runState) pipelineCa
 		event.Channel = req.Channel
 		event.ChatID = req.ChatID
 		event.SessionKey = req.SessionKey
+		event.ACPGeneration = req.ACPGeneration
 		event.TenantID = l.tenantID
 		l.emit(event)
 	}
@@ -57,7 +58,7 @@ func (l *Loop) pipelineCallbacks(req *RunRequest, bridgeRS *runState) pipelineCa
 		executeToolCall:    l.makeExecuteToolCall(req, bridgeRS),
 		executeToolRaw:     l.makeExecuteToolRaw(req),
 		processToolResult:  l.makeProcessToolResult(req, bridgeRS),
-		authorizeToolCall:  l.makeAuthorizeToolCall(),
+		authorizeToolCall:  l.makeAuthorizeToolCall(req),
 		checkReadOnly:      l.makeCheckReadOnly(req, bridgeRS),
 		sanitizeContent:    SanitizeAssistantContent,
 		flushMessages:      l.makeFlushMessages(req),
@@ -273,8 +274,15 @@ func (l *Loop) makeBuildFilteredTools(req *RunRequest) func(state *pipeline.RunS
 // the agent has toolCallPrefix configured (e.g. "proxy_exec" → canonical "exec"),
 // so we resolve the name to its canonical form before the lookup to avoid a
 // guaranteed miss on every prefixed call.
-func (l *Loop) makeAuthorizeToolCall() func(ctx context.Context, state *pipeline.RunState, tc providers.ToolCall) (bool, string) {
+func (l *Loop) makeAuthorizeToolCall(request ...*RunRequest) func(ctx context.Context, state *pipeline.RunState, tc providers.ToolCall) (bool, string) {
+	var req *RunRequest
+	if len(request) > 0 {
+		req = request[0]
+	}
 	return func(_ context.Context, state *pipeline.RunState, tc providers.ToolCall) (bool, string) {
+		if req != nil && req.EffectFence.Closed() {
+			return false, "run cancelled"
+		}
 		allowed := state.Tool.AllowedTools
 		if allowed == nil {
 			// nil allowlist means no per-iteration restriction (e.g. BuildFilteredTools not wired).
@@ -291,7 +299,8 @@ func (l *Loop) makeAuthorizeToolCall() func(ctx context.Context, state *pipeline
 		}
 
 		// Preserve lazy activation for deferred tools (typically per-user MCP).
-		if l.tools != nil && l.tools.TryActivateDeferred(name) {
+		registry := l.registryForRun(req)
+		if registry != nil && registry.TryActivateDeferred(name) {
 			// Re-check deny policy to prevent a lazy-activated tool from bypassing
 			// an explicit deny rule.
 			if l.toolPolicy != nil && l.toolPolicy.IsDenied(name, l.agentToolPolicy) {
@@ -618,6 +627,9 @@ func (l *Loop) makeFlushMessages(req *RunRequest) func(ctx context.Context, sess
 	// persists the user message on first flush to match v2 session format.
 	var userMsgFlushed bool
 	return func(ctx context.Context, sessionKey string, msgs []providers.Message) error {
+		if req.EffectFence.Closed() {
+			return context.Canceled
+		}
 		if !userMsgFlushed && !req.HideInput && req.Message != "" {
 			userMsgFlushed = true
 			l.sessions.AddMessage(ctx, sessionKey, providers.Message{
@@ -634,6 +646,9 @@ func (l *Loop) makeFlushMessages(req *RunRequest) func(ctx context.Context, sess
 
 func (l *Loop) makeUpdateMetadata(req *RunRequest) func(ctx context.Context, sessionKey string, usage providers.Usage) error {
 	return func(ctx context.Context, sessionKey string, usage providers.Usage) error {
+		if req.EffectFence.Closed() {
+			return context.Canceled
+		}
 		l.sessions.UpdateMetadata(ctx, sessionKey, l.model, l.provider.Name(), req.Channel)
 		l.sessions.AccumulateTokens(ctx, sessionKey, int64(usage.PromptTokens), int64(usage.CompletionTokens))
 		// Persist session to DB (matching v2 finalizeRun behavior).

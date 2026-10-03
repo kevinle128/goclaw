@@ -34,6 +34,12 @@ type Registry struct {
 	deferredActivator func(name string) bool
 }
 
+// ToolRegistration is one atomic registry addition.
+type ToolRegistration struct {
+	Tool     Tool
+	Metadata ToolMetadata
+}
+
 func NewRegistry() *Registry {
 	r := &Registry{
 		tools:      make(map[string]Tool),
@@ -95,6 +101,43 @@ func (r *Registry) RegisterWithMetadata(tool Tool, meta ToolMetadata) {
 	r.tools[name] = tool
 	meta.Name = name
 	r.metadata[name] = meta
+}
+
+// RegisterMany installs all tools or none. Tool names must not collide with
+// existing tools, aliases, or another item in the batch.
+func (r *Registry) RegisterMany(registrations []ToolRegistration) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	seen := make(map[string]struct{}, len(registrations))
+	for _, registration := range registrations {
+		if registration.Tool == nil {
+			return fmt.Errorf("register tool: nil tool")
+		}
+		name := registration.Tool.Name()
+		if name == "" {
+			return fmt.Errorf("register tool: empty name")
+		}
+		if _, exists := r.tools[name]; exists {
+			return fmt.Errorf("register tool %q: name already exists", name)
+		}
+		if _, exists := r.aliases[name]; exists {
+			return fmt.Errorf("register tool %q: name is reserved by an alias", name)
+		}
+		if _, exists := seen[name]; exists {
+			return fmt.Errorf("register tool %q: duplicate batch name", name)
+		}
+		seen[name] = struct{}{}
+	}
+
+	for _, registration := range registrations {
+		name := registration.Tool.Name()
+		r.tools[name] = registration.Tool
+		meta := registration.Metadata
+		meta.Name = name
+		r.metadata[name] = meta
+	}
+	return nil
 }
 
 // GetMetadata returns capability metadata for a tool.

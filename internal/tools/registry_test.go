@@ -12,6 +12,23 @@ type mockTool struct {
 	execFn func(ctx context.Context, args map[string]any) *Result
 }
 
+func TestRegisterManyRejectsToolAndAliasCollisionAtomically(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&mockTool{name: "existing"})
+	r.RegisterAlias("reserved", "existing")
+
+	err := r.RegisterMany([]ToolRegistration{
+		{Tool: &mockTool{name: "new_tool"}},
+		{Tool: &mockTool{name: "reserved"}},
+	})
+	if err == nil {
+		t.Fatal("expected alias collision")
+	}
+	if _, ok := r.Get("new_tool"); ok {
+		t.Fatal("partial registration survived collision")
+	}
+}
+
 func (m *mockTool) Name() string        { return m.name }
 func (m *mockTool) Description() string { return "mock tool" }
 func (m *mockTool) Parameters() map[string]any {

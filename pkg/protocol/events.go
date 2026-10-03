@@ -19,6 +19,7 @@ const (
 	EventVoicewakeChanged  = "voicewake.changed"
 	EventConnectChallenge  = "connect.challenge"
 	EventTalkMode          = "talk.mode"
+	EventACPToolCall       = "acp.tool.call"
 
 	// Agent summoning events (predefined agent setup via LLM).
 	EventAgentSummoning = "agent.summoning"

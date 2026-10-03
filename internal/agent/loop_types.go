@@ -291,11 +291,12 @@ type AgentEvent struct {
 	ParentAgentID string `json:"parentAgentId,omitempty"`
 
 	// Routing context (helps WS clients filter by user/channel/session)
-	SenderID   string `json:"senderId,omitempty"` // original acting user; differs from UserID in group chats
-	UserID     string `json:"userId,omitempty"`
-	Channel    string `json:"channel,omitempty"`
-	ChatID     string `json:"chatId,omitempty"`
-	SessionKey string `json:"sessionKey,omitempty"`
+	SenderID      string `json:"senderId,omitempty"` // original acting user; differs from UserID in group chats
+	UserID        string `json:"userId,omitempty"`
+	Channel       string `json:"channel,omitempty"`
+	ChatID        string `json:"chatId,omitempty"`
+	SessionKey    string `json:"sessionKey,omitempty"`
+	ACPGeneration uint64 `json:"acpGeneration,omitempty"`
 
 	// TenantID scopes this event to a specific tenant for filtering (not serialized).
 	TenantID uuid.UUID `json:"-"`
@@ -621,6 +622,7 @@ type RunRequest struct {
 	SenderName         string             // display name from channel metadata (for bootstrap auto-contact)
 	Role               string             // caller's RBAC role (admin/operator/viewer/owner); bypasses per-user grants for authenticated admins (#915)
 	Stream             bool               // whether to stream response chunks
+	ACPGeneration      uint64             // ACP prompt generation for event fencing
 	ExtraSystemPrompt  string             // optional: injected into system prompt (skills, subagent context, etc.)
 	SkillFilter        []string           // per-request skill override: nil=use agent default, []=no skills, ["x","y"]=whitelist
 	HistoryLimit       int                // max user turns to keep in context (0=unlimited, from channel config)
@@ -650,6 +652,11 @@ type RunRequest struct {
 	// Used by the gateway to associate the trace ID with the active run entry
 	// so force-abort can mark the correct trace as cancelled. Nil = no-op.
 	OnTraceCreated func(traceID uuid.UUID)
+
+	CapabilityLease   tools.CapabilityLease
+	EffectFence       *RunEffectFence
+	OwnerConnectionID string
+	runRegistry       *tools.Registry
 
 	// Delegation context (set when running as a delegate agent)
 	DelegationID  string // delegation ID for event correlation

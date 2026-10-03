@@ -98,6 +98,13 @@ default                          → RoleViewer
 
 The derived role is then used by the `PolicyEngine.CanAccess()` method to gate RPC method access (see [19 — WebSocket RPC](19-websocket-rpc.md#17-permission-matrix)).
 
+### ACP adapter key
+
+The ACP adapter requires an API key with `operator.write`, a bound owner, and the expected tenant.
+It rejects gateway-token, admin, owner, master-scope, unbound-owner, and cross-tenant authentication.
+Supply this key through `GOCLAW_ACP_API_KEY` or the adapter-only `--api-key` flag.
+See [25 — ACP Server](25-acp-server.md) for the complete launch contract.
+
 ---
 
 ## 4. Authentication Flow

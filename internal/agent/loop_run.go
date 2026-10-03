@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -18,6 +19,23 @@ import (
 func (l *Loop) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 	l.activeRuns.Add(1)
 	defer l.activeRuns.Add(-1)
+	if req.EffectFence == nil {
+		req.EffectFence = &RunEffectFence{}
+	}
+	if req.CapabilityLease != nil {
+		defer req.CapabilityLease.Release()
+		if l.registry == nil {
+			return nil, fmt.Errorf("prepare ACP run tools: tool registry unavailable")
+		}
+		req.runRegistry = l.registry.Clone()
+		registrations := make([]tools.ToolRegistration, 0)
+		for _, tool := range req.CapabilityLease.Tools() {
+			registrations = append(registrations, tools.ToolRegistration{Tool: tool, Metadata: tools.ToolMetadata{Capabilities: []tools.ToolCapability{tools.CapMCPBridged, tools.CapMutating}}})
+		}
+		if err := req.runRegistry.RegisterMany(registrations); err != nil {
+			return nil, fmt.Errorf("prepare ACP run tools: %w", err)
+		}
+	}
 
 	// Per-run emit wrapper: enriches every AgentEvent with delegation + routing context.
 	emitRun := func(event AgentEvent) {
@@ -31,6 +49,7 @@ func (l *Loop) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 		event.Channel = req.Channel
 		event.ChatID = req.ChatID
 		event.SessionKey = req.SessionKey
+		event.ACPGeneration = req.ACPGeneration
 		event.TenantID = store.TenantIDFromContext(ctx)
 		l.emit(event)
 	}

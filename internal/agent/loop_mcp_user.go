@@ -269,3 +269,12 @@ func (l *Loop) executeToolForActor(
 	}
 	return l.tools.ExecuteWithContext(ctx, name, args, channel, chatID, peerKind, sessionKey, nil)
 }
+
+func (l *Loop) executeToolForRun(req *RunRequest, ctx context.Context, name string, args map[string]any, channel, chatID, peerKind, sessionKey, actorUserID string) *tools.Result {
+	if req != nil && req.runRegistry != nil {
+		if _, ok := req.runRegistry.Get(name); ok {
+			return req.runRegistry.ExecuteWithContext(ctx, name, args, channel, chatID, peerKind, sessionKey, nil)
+		}
+	}
+	return l.executeToolForActor(ctx, name, args, channel, chatID, peerKind, sessionKey, actorUserID)
+}

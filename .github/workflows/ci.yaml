@@ -79,6 +79,17 @@ jobs:
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
 
+  acp-windows-process:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: ACP Windows process-tree cleanup
+        run: go test ./internal/acpserver -run 'TestACPWindowsJobObjectCleanup' -count=1
+
   web:
     runs-on: ubuntu-latest
     defaults:

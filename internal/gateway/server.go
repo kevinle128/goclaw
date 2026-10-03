@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	"github.com/nextlevelbuilder/goclaw/internal/acpbridge"
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
@@ -64,8 +65,10 @@ type Server struct {
 	db            interface{ PingContext(context.Context) error } // for health check DB ping
 	updateChecker *UpdateChecker
 
-	logTee   *LogTee                 // optional; auto-unsubscribes clients on disconnect
-	postTurn tools.PostTurnProcessor // optional; for team task dispatch in HTTP API paths
+	logTee          *LogTee                 // optional; auto-unsubscribes clients on disconnect
+	postTurn        tools.PostTurnProcessor // optional; for team task dispatch in HTTP API paths
+	acpManager      *acpbridge.Manager
+	onACPDisconnect func(string)
 
 	httpServer *http.Server
 	mux        *http.ServeMux
@@ -82,6 +85,11 @@ func (s *Server) SetPostTurnProcessor(pt tools.PostTurnProcessor) {
 	s.postTurn = pt
 }
 
+// SetACPManager attaches the in-memory ACP capability owner to connection lifecycle.
+func (s *Server) SetACPManager(manager *acpbridge.Manager) { s.acpManager = manager }
+
+func (s *Server) SetACPDisconnectHandler(handler func(string)) { s.onACPDisconnect = handler }
+
 // NewServer creates a new gateway server.
 func NewServer(cfg *config.Config, eventPub bus.EventPublisher, agents *agent.Router, sess store.SessionStore, toolsReg ...*tools.Registry) *Server {
 	s := &Server{
@@ -92,6 +100,7 @@ func NewServer(cfg *config.Config, eventPub bus.EventPublisher, agents *agent.Ro
 		clients:           make(map[string]*Client),
 		startedAt:         time.Now(),
 		publicURLSnapshot: NewPublicURLSnapshot(),
+		acpManager:        acpbridge.NewManager(acpbridge.DefaultLimits()),
 	}
 
 	s.upgrader = websocket.Upgrader{
@@ -112,6 +121,43 @@ func NewServer(cfg *config.Config, eventPub bus.EventPublisher, agents *agent.Ro
 
 	s.router = NewMethodRouter(s)
 	return s
+}
+
+func (s *Server) ACPManager() *acpbridge.Manager { return s.acpManager }
+
+// DrainConnections stops WebSocket admission, closes all active clients, and
+// waits for connection-owned runs and ACP capabilities to be released.
+func (s *Server) DrainConnections(ctx context.Context) error {
+	if s.httpServer != nil {
+		_ = s.httpServer.Shutdown(ctx)
+	}
+	s.mu.RLock()
+	clients := make([]*Client, 0, len(s.clients))
+	for _, client := range s.clients {
+		clients = append(clients, client)
+	}
+	s.mu.RUnlock()
+	for _, client := range clients {
+		client.Close()
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s.mu.RLock()
+		remaining := len(s.clients)
+		s.mu.RUnlock()
+		if remaining == 0 {
+			if s.acpManager != nil {
+				s.acpManager.Close()
+			}
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // RateLimiter returns the server's rate limiter for use by method handlers.
@@ -349,6 +395,20 @@ func tokenAuthMiddleware(token string, next http.Handler) http.Handler {
 // Start begins listening for WebSocket and HTTP connections.
 func (s *Server) Start(ctx context.Context) error {
 	mux := s.BuildMux()
+	if s.acpManager != nil {
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case now := <-ticker.C:
+					s.acpManager.Reap(now)
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
 
 	// Wrap with CORS for desktop dev mode (Wails serves frontend on different port).
 	var handler http.Handler = mux
@@ -754,6 +814,14 @@ func (s *Server) registerClient(c *Client) {
 }
 
 func (s *Server) unregisterClient(c *Client) {
+	// Stop and await connection-owned runs before releasing their capabilities.
+	if s.onACPDisconnect != nil {
+		s.onACPDisconnect(c.id)
+	}
+	s.agents.AbortAndAwaitConnection(c.id)
+	if s.acpManager != nil {
+		s.acpManager.ReleaseConnection(c.id)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.clients, c.id)

@@ -3,6 +3,7 @@
 GoClaw's primary control plane is a WebSocket-based JSON-RPC protocol (v3). Clients connect to `/ws`, authenticate via `connect`, then exchange request/response/event frames.
 
 For the wire protocol, frame format, and connection lifecycle, see [04 — Gateway Protocol](04-gateway-protocol.md). This document catalogs every available RPC method.
+The ACP adapter adds session-scoped capability calls to this protocol; see [25 — ACP Server](25-acp-server.md).
 
 ---
 

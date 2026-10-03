@@ -194,6 +194,14 @@ func (d *gatewayDeps) runLifecycle(
 
 		// Broadcast shutdown event
 		d.server.BroadcastEvent(*protocol.NewEvent(protocol.EventShutdown, nil))
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := d.server.DrainConnections(drainCtx); err != nil {
+			drainCancel()
+			slog.Error("gateway shutdown could not drain ACP work", "error", err)
+			cancel()
+			return
+		}
+		drainCancel()
 
 		// Stop channels, cron, heartbeat, and task ticker
 		d.channelMgr.StopAll(context.Background())

@@ -71,6 +71,23 @@ func TestChatDebouncerDiscardDropsPendingBeforeCancel(t *testing.T) {
 	assertNoChatDebounceFlush(t, out)
 }
 
+func TestChatDebouncerDisconnectDiscardsOnlyOwnedReservations(t *testing.T) {
+	out := make(chan []chatSendRequest, 1)
+	d := newChatDebouncer(func(items []chatSendRequest) { out <- items })
+	defer d.Stop()
+	d.Push("shared", time.Minute, chatSendRequest{ownerConnectionID: "conn-1"})
+	d.Push("shared", time.Minute, chatSendRequest{ownerConnectionID: "conn-2"})
+	discarded := d.DiscardConnection("conn-1")
+	if len(discarded) != 1 || discarded[0].ownerConnectionID != "conn-1" {
+		t.Fatalf("discarded = %#v", discarded)
+	}
+	d.Flush("shared")
+	items := waitChatDebounce(t, out)
+	if len(items) != 1 || items[0].ownerConnectionID != "conn-2" {
+		t.Fatalf("remaining = %#v", items)
+	}
+}
+
 func TestChatDebounceDelayGlobalAndAgentOverride(t *testing.T) {
 	// hasMedia=false: legacy behavior preserved (no floor applied).
 	if got := chatDebounceDelay(&config.Config{}, nil, false); got != 0 {

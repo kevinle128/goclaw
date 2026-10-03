@@ -3,8 +3,11 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +26,9 @@ type Client struct {
 	role          permissions.Role
 	userID        string // external user ID (TEXT, free-form), set during connect
 	send          chan []byte
+	sendMu        sync.RWMutex
+	closeOnce     sync.Once
+	closed        atomic.Bool
 
 	connectedAt time.Time // when the client connected
 	remoteAddr  string    // peer IP (extracted from proxy headers or RemoteAddr)
@@ -50,6 +56,18 @@ type Client struct {
 	// request lacked Host headers.
 	upgradeURL string
 }
+
+var (
+	// ErrClientClosed means the WebSocket client can no longer accept frames.
+	ErrClientClosed = errors.New("gateway client closed")
+	// ErrClientSendQueueFull means a critical frame could not be queued.
+	ErrClientSendQueueFull = errors.New("gateway client send queue full")
+	// ErrClientCriticalFrameTooLarge means a critical frame exceeds the ACP
+	// transport budget below the Gateway's hard WebSocket limit.
+	ErrClientCriticalFrameTooLarge = errors.New("gateway critical frame exceeds size limit")
+)
+
+const maxCriticalWSMessageSize = 480 * 1024
 
 func NewClient(conn *websocket.Conn, server *Server, remoteIP string) *Client {
 	return &Client{
@@ -176,11 +194,11 @@ func (c *Client) SendResponse(resp *protocol.ResponseFrame) {
 		slog.Error("marshal response failed", "error", err)
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Debug("client gone, dropping response", "client", c.id)
-		}
-	}()
+	c.sendMu.RLock()
+	defer c.sendMu.RUnlock()
+	if c.closed.Load() {
+		return
+	}
 	select {
 	case c.send <- data:
 	default:
@@ -195,15 +213,61 @@ func (c *Client) SendEvent(event protocol.EventFrame) {
 		slog.Error("marshal event failed", "error", err)
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Debug("client gone, dropping event", "client", c.id)
-		}
-	}()
+	c.sendMu.RLock()
+	defer c.sendMu.RUnlock()
+	if c.closed.Load() {
+		return
+	}
 	select {
 	case c.send <- data:
 	default:
 		slog.Warn("client send buffer full, dropping event", "client", c.id)
+	}
+}
+
+// SendCriticalResponse queues a response or closes the client if delivery
+// cannot be guaranteed. Existing SendResponse behavior remains best-effort.
+func (c *Client) SendCriticalResponse(resp *protocol.ResponseFrame) error {
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	if len(data) > maxCriticalWSMessageSize {
+		return ErrClientCriticalFrameTooLarge
+	}
+	return c.sendCritical(data)
+}
+
+// SendCriticalEvent queues an event or closes the client if delivery cannot
+// be guaranteed. Existing SendEvent behavior remains best-effort.
+func (c *Client) SendCriticalEvent(event protocol.EventFrame) error {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	if len(data) > maxCriticalWSMessageSize {
+		return ErrClientCriticalFrameTooLarge
+	}
+	return c.sendCritical(data)
+}
+
+func (c *Client) sendCritical(data []byte) error {
+	c.sendMu.RLock()
+	if c.closed.Load() {
+		c.sendMu.RUnlock()
+		return ErrClientClosed
+	}
+	select {
+	case c.send <- data:
+		c.sendMu.RUnlock()
+		return nil
+	default:
+		c.sendMu.RUnlock()
+		c.Close()
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+		return ErrClientSendQueueFull
 	}
 }
 
@@ -263,5 +327,15 @@ func (c *Client) SetTeamAccess(teamIDs []string) {
 
 // Close shuts down the client connection.
 func (c *Client) Close() {
-	close(c.send)
+	c.closeOnce.Do(func() {
+		c.closed.Store(true)
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+		c.sendMu.Lock()
+		if c.send != nil {
+			close(c.send)
+		}
+		c.sendMu.Unlock()
+	})
 }

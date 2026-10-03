@@ -21,6 +21,9 @@ import (
 func (l *Loop) makeExecuteToolCall(req *RunRequest, bridgeRS *runState) func(ctx context.Context, state *pipeline.RunState, tc providers.ToolCall) ([]providers.Message, error) {
 	emitRun := makeToolEmitRun(l, req)
 	return func(ctx context.Context, state *pipeline.RunState, tc providers.ToolCall) ([]providers.Message, error) {
+		if req.EffectFence.Closed() {
+			return nil, context.Canceled
+		}
 		tc = l.normalizeToolCall(tc)
 		registryName := l.canonicalToolName(l.resolveToolCallName(tc.Name))
 		argsJSON, _ := json.Marshal(tc.Arguments)
@@ -51,7 +54,7 @@ func (l *Loop) makeExecuteToolCall(req *RunRequest, bridgeRS *runState) func(ctx
 		// resolve to the calling user's BridgeTool (not the first user's
 		// BridgeTool leaked via shared registry).
 		actorUserID := resolveActorUserID(req.UserID, req.SenderID, req.PeerKind, req.ChannelType)
-		result := l.executeToolForActor(ctx, registryName, tc.Arguments,
+		result := l.executeToolForRun(req, ctx, registryName, tc.Arguments,
 			req.Channel, req.ChatID, req.PeerKind, req.SessionKey, actorUserID)
 		toolDuration := time.Since(toolStart)
 
@@ -89,6 +92,9 @@ type toolRawResult struct {
 func (l *Loop) makeExecuteToolRaw(req *RunRequest) func(ctx context.Context, tc providers.ToolCall) (providers.Message, any, error) {
 	emitRun := makeToolEmitRun(l, req)
 	return func(ctx context.Context, tc providers.ToolCall) (providers.Message, any, error) {
+		if req.EffectFence.Closed() {
+			return providers.Message{}, nil, context.Canceled
+		}
 		tc = l.normalizeToolCall(tc)
 		registryName := l.canonicalToolName(l.resolveToolCallName(tc.Name))
 		argsJSON, _ := json.Marshal(tc.Arguments)
@@ -121,7 +127,7 @@ func (l *Loop) makeExecuteToolRaw(req *RunRequest) func(ctx context.Context, tc 
 		// C2 fix (parallel path): route through executeToolForActor for per-user
 		// MCP tool isolation. Same rationale as makeExecuteToolCall above.
 		actorUserID := resolveActorUserID(req.UserID, req.SenderID, req.PeerKind, req.ChannelType)
-		result := l.executeToolForActor(ctx, registryName, tc.Arguments,
+		result := l.executeToolForRun(req, ctx, registryName, tc.Arguments,
 			req.Channel, req.ChatID, req.PeerKind, req.SessionKey, actorUserID)
 		dur := time.Since(start)
 

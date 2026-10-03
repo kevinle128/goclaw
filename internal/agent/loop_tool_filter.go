@@ -20,17 +20,18 @@ var imageGenToolDef = providers.ToolDefinition{Type: "image_generation"}
 // Returns tool definitions for the provider, an allowed-tools map for execution validation,
 // and the (potentially modified) messages slice when final-iteration stripping appends a hint.
 func (l *Loop) buildFilteredTools(req *RunRequest, hadBootstrap bool, iteration, maxIter int, messages []providers.Message) ([]providers.ToolDefinition, map[string]bool, []providers.Message) {
+	registry := l.registryForRun(req)
 	// Build provider request with policy-filtered tools.
 	var toolDefs []providers.ToolDefinition
 	var allowedTools map[string]bool
 	if l.toolPolicy != nil {
-		toolDefs = l.toolPolicy.FilterTools(l.tools, l.id, l.provider.Name(), l.agentToolPolicy, req.ToolAllow, false, false)
+		toolDefs = l.toolPolicy.FilterTools(registry, l.id, l.provider.Name(), l.agentToolPolicy, req.ToolAllow, false, false)
 		allowedTools = make(map[string]bool, len(toolDefs))
 		for _, td := range toolDefs {
 			allowedTools[td.Function.Name] = true
 		}
 	} else {
-		toolDefs = l.tools.ProviderDefs()
+		toolDefs = registry.ProviderDefs()
 	}
 
 	// V3 orchestration mode filtering: hide tools the agent shouldn't see.
@@ -88,7 +89,7 @@ func (l *Loop) buildFilteredTools(req *RunRequest, hadBootstrap bool, iteration,
 	if req.ChannelType != "" {
 		filtered := toolDefs[:0:0]
 		for _, td := range toolDefs {
-			if tool, ok := l.tools.Get(td.Function.Name); ok {
+			if tool, ok := registry.Get(td.Function.Name); ok {
 				if ca, ok := tool.(tools.ChannelAware); ok {
 					if !slices.Contains(ca.RequiredChannelTypes(), req.ChannelType) {
 						continue
@@ -124,4 +125,11 @@ func (l *Loop) buildFilteredTools(req *RunRequest, hadBootstrap bool, iteration,
 	}
 
 	return toolDefs, allowedTools, messages
+}
+
+func (l *Loop) registryForRun(req *RunRequest) tools.ToolExecutor {
+	if req != nil && req.runRegistry != nil {
+		return req.runRegistry
+	}
+	return l.tools
 }

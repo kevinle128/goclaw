@@ -11,6 +11,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
 // chatMediaDebounceFloorMs is the minimum debounce window applied to Web Chat
@@ -20,13 +21,23 @@ import (
 const chatMediaDebounceFloorMs = 1000
 
 type chatSendRequest struct {
-	ctx        context.Context
-	client     *gateway.Client
-	requestID  string
-	params     chatSendParams
-	loop       agent.Agent
-	userID     string
-	sessionKey string
+	ctx               context.Context
+	client            *gateway.Client
+	requestID         string
+	params            chatSendParams
+	loop              agent.Agent
+	userID            string
+	sessionKey        string
+	capabilityLease   tools.CapabilityLease
+	effectFence       *agent.RunEffectFence
+	ownerConnectionID string
+}
+
+func (r *chatSendRequest) releaseReservation() {
+	if r.capabilityLease != nil {
+		r.capabilityLease.Release()
+		r.capabilityLease = nil
+	}
 }
 
 type chatDebouncer struct {
@@ -117,17 +128,42 @@ func (d *chatDebouncer) Take(key string) []chatSendRequest {
 	return items
 }
 
-func (d *chatDebouncer) Discard(key string) {
+func (d *chatDebouncer) Discard(key string) []chatSendRequest {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	buf, ok := d.buffers[key]
 	if !ok {
-		return
+		return nil
 	}
 	if buf.timer != nil {
 		buf.timer.Stop()
 	}
 	delete(d.buffers, key)
+	return buf.items
+}
+
+func (d *chatDebouncer) DiscardConnection(connectionID string) []chatSendRequest {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var discarded []chatSendRequest
+	for key, buffer := range d.buffers {
+		kept := buffer.items[:0]
+		for _, item := range buffer.items {
+			if item.ownerConnectionID == connectionID {
+				discarded = append(discarded, item)
+			} else {
+				kept = append(kept, item)
+			}
+		}
+		buffer.items = kept
+		if len(kept) == 0 {
+			if buffer.timer != nil {
+				buffer.timer.Stop()
+			}
+			delete(d.buffers, key)
+		}
+	}
+	return discarded
 }
 
 func (d *chatDebouncer) Stop() {

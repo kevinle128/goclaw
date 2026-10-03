@@ -20,9 +20,12 @@ func registerAllMethods(server *gateway.Server, agents *agent.Router, sessStore 
 
 	// Phase 1: Core methods
 	chatMethods := methods.NewChatMethods(agents, sessStore, cfg, server.RateLimiter(), msgBus)
+	chatMethods.SetACPManager(server.ACPManager())
+	server.SetACPDisconnectHandler(chatMethods.DiscardACPConnection)
 	chatMethods.SetAudioManager(audioMgr) // Wire TTS auto-apply for WS responses
 	chatMethods.SetUsageCapService(usageCapSvc)
 	chatMethods.Register(router)
+	methods.NewACPToolMethods(server.ACPManager()).Register(router)
 	methods.NewAgentsMethods(agents, cfg, cfgPath, workspace, agentStore, contextFileInterceptor, msgBus).Register(router)
 	methods.NewSessionsMethods(sessStore, msgBus, cfg).Register(router)
 	methods.NewRunTimelineMethods(runTimeline, cfg).Register(router)
