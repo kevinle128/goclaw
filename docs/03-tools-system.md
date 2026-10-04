@@ -525,6 +525,10 @@ GoClaw integrates with Model Context Protocol (MCP) servers. The MCP Manager con
 | `sse` | Connect to SSE endpoint via URL |
 | `streamable-http` | Connect to HTTP streaming endpoint |
 
+Local MCP servers can use loopback addresses because they are valid tool services on the gateway host.
+The [MCP URL policy](../internal/mcp/url_validation.go) is separate from [webhook URL validation](../internal/security/ssrf.go); other private and metadata destinations remain blocked.
+Connection tests and server Create, Update, and Import use the same MCP policy.
+
 **Reliability:** Health checks every 30 seconds. Reconnection via exponential backoff (2s initial, 60s max, 10 attempts).
 
 **Access control:**

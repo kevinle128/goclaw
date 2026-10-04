@@ -5,8 +5,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-
-	"github.com/nextlevelbuilder/goclaw/internal/security"
 )
 
 // Allowed commands for stdio transport (basename only).
@@ -25,13 +23,13 @@ var shellMetaChars = regexp.MustCompile(`[;|&$` + "`" + `(){}[\]<>]`)
 
 // Dangerous arg flags that enable code execution.
 var dangerousArgPatterns = []string{
-	"--eval", "-e", "-c",      // Code execution flags
-	"--require", "-r",         // Module injection
-	"--import",                // ES module injection
-	"exec(", "eval(",          // Inline code
-	"__import__",              // Python import injection
-	"child_process",           // Node.js process spawning
-	"subprocess",              // Python subprocess
+	"--eval", "-e", "-c", // Code execution flags
+	"--require", "-r", // Module injection
+	"--import",       // ES module injection
+	"exec(", "eval(", // Inline code
+	"__import__",    // Python import injection
+	"child_process", // Node.js process spawning
+	"subprocess",    // Python subprocess
 }
 
 // Fail-closed env var allowlist — only these are permitted for env: resolution.
@@ -105,21 +103,6 @@ func ValidateArgs(args []string) error {
 		if shellMetaChars.MatchString(arg) {
 			return fmt.Errorf("arg[%d] contains shell metacharacters", i)
 		}
-	}
-	return nil
-}
-
-// ValidateURL checks URL for SSRF vulnerabilities using the existing security package.
-// This provides DNS rebinding protection via IP pinning.
-func ValidateURL(rawURL string) error {
-	if rawURL == "" {
-		return nil
-	}
-
-	// Reuse existing SSRF validation with DNS rebinding protection
-	_, _, err := security.Validate(rawURL)
-	if err != nil {
-		return fmt.Errorf("URL validation failed: %w", err)
 	}
 	return nil
 }

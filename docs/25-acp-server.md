@@ -53,8 +53,13 @@ GoClaw starts those processes in the adapter, not in the Gateway.
 The executable must be inside an approved `--mcp-exec-root`, and the working directory must stay inside `--workspace-root` after symlink resolution.
 
 MCP environment values stay in the adapter process.
+Validated client environment entries can replace inherited base values, including `PATH`.
+Duplicate client entries and `GOCLAW_*` entries are rejected.
 The Gateway receives filtered tool schemas and bounded tool results, but it does not receive MCP commands, arguments, environment values, or secrets.
 Dynamic tools remain subject to the normal GoClaw tool policy for the bound run.
+
+Buzz shows ACP text in the activity feed.
+To send a chat reply, the agent must use the Buzz CLI through `buzz-dev-mcp` with its active Buzz identity.
 
 ## Resource limits
 

@@ -249,6 +249,63 @@ func TestGatewayClientRoutesACPToolGeneration(t *testing.T) {
 	close(keepOpen)
 }
 
+func TestGatewayClientRoutesACPToolCallsAfterRunStart(t *testing.T) {
+	sendEvents := make(chan struct{})
+	keepOpen := make(chan struct{})
+	defer close(keepOpen)
+	url := gatewayTestServer(t, func(conn *websocket.Conn) {
+		authenticateGatewayTestClient(t, conn)
+		<-sendEvents
+		mustWriteJSON(t, conn, protocol.NewEvent(protocol.EventAgent, map[string]any{
+			"type": protocol.AgentEventRunStarted, "sessionKey": "session-a", "runId": "run-a", "acpGeneration": 7,
+		}))
+		for _, route := range []struct {
+			sessionKey string
+			generation uint64
+		}{
+			{"session-b", 7},
+			{"session-a", 6},
+			{"session-a", 7},
+		} {
+			mustWriteJSON(t, conn, protocol.NewEvent(protocol.EventACPToolCall, map[string]any{
+				"sessionKey": route.sessionKey, "generation": route.generation,
+				"capabilityId": "cap-1", "callId": "call-1", "toolName": "mcp_buzz__shell", "arguments": map[string]any{},
+			}))
+		}
+		for _, runID := range []string{"run-b", "run-a"} {
+			mustWriteJSON(t, conn, protocol.NewEvent(protocol.EventAgent, map[string]any{
+				"type": "chunk", "sessionKey": "session-a", "runId": runID, "acpGeneration": 7,
+			}))
+		}
+		<-keepOpen
+	})
+	client := connectGatewayTestClient(t, url)
+	defer client.Close()
+	subscription, err := client.Subscribe("acp-a", "session-a", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(sendEvents)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for _, want := range []string{protocol.EventAgent, protocol.EventACPToolCall, protocol.EventAgent} {
+		event, err := subscription.Next(ctx)
+		if err != nil {
+			t.Fatalf("Next() waiting for %s: %v", want, err)
+		}
+		if event.Event != want || event.SessionKey != "session-a" || event.Generation != 7 {
+			t.Fatalf("event = %+v, want %s for session-a generation 7", event, want)
+		}
+		if event.Event == protocol.EventACPToolCall {
+			if event.RunID != "" {
+				t.Fatalf("ACP tool event unexpectedly has run ID %q", event.RunID)
+			}
+		} else if event.RunID != "run-a" {
+			t.Fatalf("agent event run ID = %q, want run-a", event.RunID)
+		}
+	}
+}
+
 func TestGatewayClientEventOverflowFailsTurn(t *testing.T) {
 	sendEvents := make(chan struct{})
 	keepOpen := make(chan struct{})

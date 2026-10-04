@@ -94,6 +94,22 @@ func TestMCPEnvironmentDoesNotInheritHostSecrets(t *testing.T) {
 	}
 }
 
+func TestMCPEnvironmentAllowsClientPathOverlay(t *testing.T) {
+	t.Setenv("PATH", "/inherited/bin")
+	entries := []EnvVariable{{Name: "PATH", Value: "/buzz/bin:/usr/bin"}}
+	environment, _, err := minimalMCPEnvironment(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(environment, "PATH=/buzz/bin:/usr/bin") || slices.Contains(environment, "PATH=/inherited/bin") {
+		t.Fatalf("client PATH overlay was lost: %v", environment)
+	}
+	entries = append(entries, EnvVariable{Name: "PATH", Value: "/other/bin"})
+	if _, _, err := minimalMCPEnvironment(entries); err == nil {
+		t.Fatal("duplicate client PATH was accepted")
+	}
+}
+
 func TestMCPExecutableRequiresApprovedSecureRoot(t *testing.T) {
 	root := t.TempDir()
 	workspace := t.TempDir()

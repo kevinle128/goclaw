@@ -6,11 +6,6 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/security"
 )
 
-func init() {
-	// Allow loopback in tests since we're testing validation logic, not actual connections
-	security.SetAllowLoopbackForTest(true)
-}
-
 func TestValidateCommand_Injection_Rejected(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -85,22 +80,34 @@ func TestValidateArgs_DangerousPatterns_Rejected(t *testing.T) {
 }
 
 func TestValidateURL_SSRF_Rejected(t *testing.T) {
-	// Re-disable loopback for SSRF tests
-	security.SetAllowLoopbackForTest(false)
-	defer security.SetAllowLoopbackForTest(true)
-
 	tests := []struct {
 		name    string
 		url     string
 		wantErr bool
 	}{
-		{"localhost", "http://localhost:8080/mcp", true},
-		{"127.0.0.1", "http://127.0.0.1/mcp", true},
+		{"localhost", "http://localhost:8080/mcp", false},
+		{"HTTPS localhost", "https://localhost:8080/mcp", false},
+		{"127.0.0.1", "http://127.0.0.1/mcp", false},
+		{"loopback range", "http://127.0.0.2/mcp", false},
+		{"public IPv4", "https://93.184.216.34/mcp", false},
+		{"public IPv6", "https://[2606:4700:4700::1111]/mcp", false},
 		{"AWS metadata", "http://169.254.169.254/latest/meta-data", true},
 		{"private 10.x", "http://10.0.0.1/mcp", true},
 		{"private 172.16.x", "http://172.16.0.1/mcp", true},
 		{"private 192.168.x", "http://192.168.1.1/mcp", true},
-		{"IPv6 localhost", "http://[::1]/mcp", true},
+		{"IPv6 localhost", "http://[::1]/mcp", false},
+		{"IPv4-mapped localhost", "http://[::ffff:127.0.0.1]/mcp", false},
+		{"IPv6 private", "http://[fd00::1]/mcp", true},
+		{"IPv4-mapped private", "http://[::ffff:10.0.0.1]/mcp", true},
+		{"IPv6 link-local", "http://[fe80::1]/mcp", true},
+		{"multicast", "http://224.0.0.1/mcp", true},
+		{"unspecified", "http://0.0.0.0/mcp", true},
+		{"IPv6 unspecified", "http://[::]/mcp", true},
+		{"missing host", "http:///mcp", true},
+		{"invalid URL", "://", true},
+		{"invalid port", "http://localhost:bad/mcp", true},
+		{"missing scheme", "localhost:8080/mcp", true},
+		{"unresolvable host", "http://mcp-server.invalid/mcp", true},
 		{"file scheme", "file:///etc/passwd", true},
 		{"empty url", "", false},
 		// Note: external URLs may fail DNS resolution in tests, but that's expected
@@ -115,6 +122,17 @@ func TestValidateURL_SSRF_Rejected(t *testing.T) {
 				t.Errorf("ValidateURL(%q) = %v, want nil", tt.url, err)
 			}
 		})
+	}
+}
+
+func TestValidateURL_WebhookPolicyRemainsSeparate(t *testing.T) {
+	for _, rawURL := range []string{"http://localhost:8080/mcp", "http://127.0.0.1/mcp", "http://[::1]/mcp"} {
+		if err := ValidateURL(rawURL); err != nil {
+			t.Fatalf("MCP must allow loopback: %v", err)
+		}
+		if _, _, err := security.Validate(rawURL); err == nil {
+			t.Fatalf("webhook must still reject %q", rawURL)
+		}
 	}
 }
 
@@ -205,13 +223,15 @@ func TestValidateServerConfig_Combined(t *testing.T) {
 			name:      "streamable-http with localhost",
 			transport: "streamable-http",
 			url:       "http://localhost/mcp",
-			wantErr:   true,
+			wantErr:   false,
+		},
+		{
+			name:      "sse with loopback",
+			transport: "sse",
+			url:       "http://127.0.0.1/mcp",
+			wantErr:   false,
 		},
 	}
-
-	// Disable loopback for these tests
-	security.SetAllowLoopbackForTest(false)
-	defer security.SetAllowLoopbackForTest(true)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -310,14 +310,16 @@ func minimalMCPEnvironment(entries []EnvVariable) ([]string, []string, error) {
 		}
 	}
 	secrets := make([]string, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		upperName := strings.ToUpper(entry.Name)
 		if !validEnvName.MatchString(entry.Name) || strings.ContainsRune(entry.Value, '\x00') || strings.HasPrefix(upperName, "GOCLAW_") {
 			return nil, nil, errors.New("invalid MCP environment entry")
 		}
-		if _, exists := values[entry.Name]; exists {
+		if _, exists := seen[entry.Name]; exists {
 			return nil, nil, errors.New("duplicate or protected MCP environment entry")
 		}
+		seen[entry.Name] = struct{}{}
 		values[entry.Name] = entry.Value
 		if entry.Value != "" {
 			secrets = append(secrets, entry.Value)

@@ -580,6 +580,10 @@ func (s *GatewaySubscription) accept(event GatewayEvent) bool {
 		s.runID = event.RunID
 		return true
 	}
+	// MCP calls are routed by session and generation, then checked against the capability.
+	if event.Event == protocol.EventACPToolCall {
+		return true
+	}
 	return s.runID == "" || (event.RunID != "" && event.RunID == s.runID)
 }
 

@@ -31,6 +31,14 @@ func (h *MCPHandler) handleTestConnection(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgRequired, "transport")})
 		return
 	}
+	if err := mcpbridge.ValidateServerConfig(req.Transport, req.Command, req.Args, req.URL); err != nil {
+		slog.Warn("security.mcp.test_rejected", "user_id", store.UserIDFromContext(r.Context()), "reason", err.Error())
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
 
 	tools, err := mcpbridge.DiscoverTools(r.Context(), req.Transport, req.Command, req.Args, req.Env, req.URL, req.Headers)
 	if err != nil {
