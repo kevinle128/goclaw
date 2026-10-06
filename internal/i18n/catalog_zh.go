@@ -34,6 +34,7 @@ func init() {
 		MsgGatewayOperatorCredentialFailed:     "已跳过网关 operator 访问，因为无法存储 credential。",
 
 		// Chat
+		MsgACPPromptTooLarge: "ACP 提示超过 %d 字节限制",
 		MsgRateLimitExceeded: "请求频率超限 — 请稍候",
 		MsgNoUserMessage:     "未找到用户消息",
 		MsgUserIDRequired:    "user_id 是必填项",

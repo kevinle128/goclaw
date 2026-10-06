@@ -13,6 +13,9 @@ import (
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
+// MaxGatewayFrameBytes bounds ACP frames and the final merged agent input.
+const MaxGatewayFrameBytes = 480 << 10
+
 var (
 	ErrNotFound        = errors.New("ACP capability not found")
 	ErrNotOwner        = errors.New("ACP capability owner mismatch")

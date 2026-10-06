@@ -10,8 +10,10 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/acpbridge"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/internal/workspace"
@@ -25,7 +27,7 @@ type contextSetupResult struct {
 
 // injectContext enriches the context with agent, tenant, user, workspace, and tool-level
 // values needed by the agent loop and tool execution. Also runs input guard and message
-// truncation. Returns error only if input guard blocks the message.
+// truncation. Returns an error if the input guard or ACP size limit rejects the message.
 func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetupResult, error) {
 	// Inject agent UUID + key into context for tool routing
 	if l.agentUUID != uuid.Nil {
@@ -347,12 +349,16 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	// write_file(deliver=true) marks paths, message self-send guard checks before allowing.
 	ctx = tools.WithDeliveredMedia(ctx, tools.NewDeliveredMedia())
 
-	// Security: truncate oversized user messages gracefully (feed truncation notice into LLM)
+	// ACP includes history before the current event. Never clip the event away.
+	// Check the final input because debounce and media processing can add content.
+	if req.ACPGeneration > 0 && len(req.Message) > acpbridge.MaxGatewayFrameBytes {
+		return contextSetupResult{}, fmt.Errorf("%s", i18n.T(store.LocaleFromContext(ctx), i18n.MsgACPPromptTooLarge, acpbridge.MaxGatewayFrameBytes))
+	}
 	maxChars := l.maxMessageChars
 	if maxChars <= 0 {
 		maxChars = config.DefaultMaxMessageChars
 	}
-	if len(req.Message) > maxChars {
+	if req.ACPGeneration == 0 && len(req.Message) > maxChars {
 		originalLen := len(req.Message)
 		req.Message = req.Message[:maxChars] +
 			fmt.Sprintf("\n\n[System: Message was truncated from %d to %d characters due to size limit. "+

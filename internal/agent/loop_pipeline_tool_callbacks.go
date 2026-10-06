@@ -348,6 +348,7 @@ func makeToolEmitRun(l *Loop, req *RunRequest) func(AgentEvent) {
 		event.TeamTaskID = req.TeamTaskID
 		event.ParentAgentID = req.ParentAgentID
 		event.SessionKey = req.SessionKey
+		event.ACPGeneration = req.ACPGeneration
 		event.SenderID = req.SenderID
 		event.UserID = req.UserID
 		event.Channel = req.Channel

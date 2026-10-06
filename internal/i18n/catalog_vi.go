@@ -34,6 +34,7 @@ func init() {
 		MsgGatewayOperatorCredentialFailed:     "Đã bỏ qua quyền gateway operator vì không thể lưu credential.",
 
 		// Chat
+		MsgACPPromptTooLarge: "Prompt ACP vượt quá giới hạn %d byte",
 		MsgRateLimitExceeded: "vượt quá giới hạn tốc độ — vui lòng đợi",
 		MsgNoUserMessage:     "không tìm thấy tin nhắn người dùng",
 		MsgUserIDRequired:    "user_id là bắt buộc",
