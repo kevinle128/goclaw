@@ -42,6 +42,9 @@ Each ACP session gets an opaque ID and an internal Gateway session key for the f
 One prompt can run in each ACP session, and different ACP sessions can run concurrently.
 Cancellation keeps the ACP session available for a later prompt.
 Idle expiry, input EOF, signal shutdown, or adapter shutdown releases the session and its local MCP processes.
+The adapter expires sessions after 30 minutes without a prompt in flight.
+A later prompt for an expired ID returns `-32002` with `Unknown session`.
+The client must discard that ID and create a new session before its next attempt.
 
 A connection loss after `chat.send` is indeterminate.
 GoClaw does not replay that prompt because it can already have produced side effects.
@@ -59,12 +62,27 @@ The Gateway receives filtered tool schemas and bounded tool results, but it does
 Dynamic tools remain subject to the normal GoClaw tool policy for the bound run.
 
 Buzz shows ACP text in the activity feed.
+The feed also receives emitted thinking, tool calls, tool results, and turn completion.
+For a remote `buzz-acp` harness, set `BUZZ_ACP_RELAY_OBSERVER=true` to publish encrypted Activity events to the agent owner through the relay.
 To send a chat reply, the agent must use the Buzz CLI through `buzz-dev-mcp` with its active Buzz identity.
+For an ordinary DM, send the answer to the main channel without `--reply-to` or `--thread`.
+After the CLI confirms delivery, return a short ACP completion summary that states the result of the work.
+Buzz renders the sent-message tool as a card with the delivered answer, so repeating that full answer as ACP text creates duplicate content in Activity.
+Keep tool updates enabled so the full sent answer and delivery outcome remain available.
+
+For shared channel mentions, configure both the Buzz agent's **Who can send instructions** policy and the remote harness permission.
+Use `Anyone` and `BUZZ_ACP_RESPOND_TO=anyone` when channel members may call the agent.
+Buzz uses the verified owner's published policy to filter the mention list for other users.
+The agent must also be a bot member of the shared channel.
+A manually configured server launcher does not automatically copy changes from the desktop agent settings.
 
 ## Resource limits
 
 The adapter limits input lines, output frames, prompt size, active sessions, queued frames, pending requests, MCP servers, discovered tools, and Gateway frame size.
-The adapter reserves 480 KiB for serialized Gateway frames below the Gateway 512 KiB connection limit.
+The adapter accepts up to 384 KiB of prompt text and reserves 480 KiB for serialized Gateway frames below the Gateway 512 KiB connection limit.
+The agent keeps the full ACP prompt, including the current event after conversation history.
+The final merged ACP input is rejected above 480 KiB instead of being truncated.
+Ordinary chat messages still use `gateway.max_message_chars`.
 Queue overflow on an ACP-critical frame fails the owning connection instead of silently dropping the frame.
 
 ## Shutdown

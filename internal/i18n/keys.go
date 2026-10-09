@@ -35,10 +35,11 @@ const (
 	MsgGatewayOperatorCredentialFailed     = "gateway_operator.credential_failed"
 
 	// --- Chat ---
-	MsgRateLimitExceeded = "error.rate_limit"       // "rate limit exceeded — please wait"
-	MsgNoUserMessage     = "error.no_user_message"  // "no user message found"
-	MsgUserIDRequired    = "error.user_id_required" // "user_id is required"
-	MsgMsgRequired       = "error.message_required" // "message is required"
+	MsgRateLimitExceeded = "error.rate_limit"           // "rate limit exceeded — please wait"
+	MsgNoUserMessage     = "error.no_user_message"      // "no user message found"
+	MsgUserIDRequired    = "error.user_id_required"     // "user_id is required"
+	MsgACPPromptTooLarge = "error.acp_prompt_too_large" // "ACP prompt exceeds the %d-byte limit"
+	MsgMsgRequired       = "error.message_required"     // "message is required"
 
 	// --- Abort ---
 	MsgAbortStopped         = "abort.stopped"          // "run stopped"

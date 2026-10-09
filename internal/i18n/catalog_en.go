@@ -34,6 +34,7 @@ func init() {
 		MsgGatewayOperatorCredentialFailed:     "Gateway operator access was skipped because credentials could not be stored.",
 
 		// Chat
+		MsgACPPromptTooLarge: "ACP prompt exceeds the %d-byte limit",
 		MsgRateLimitExceeded: "rate limit exceeded — please wait",
 		MsgNoUserMessage:     "no user message found",
 		MsgUserIDRequired:    "user_id is required",

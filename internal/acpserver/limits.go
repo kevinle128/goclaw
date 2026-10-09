@@ -1,6 +1,10 @@
 package acpserver
 
-import "time"
+import (
+	"time"
+
+	"github.com/nextlevelbuilder/goclaw/internal/acpbridge"
+)
 
 const (
 	MaxInputLineBytes       = 1 << 20
@@ -14,7 +18,7 @@ const (
 	MaxTools                = 256
 	MaxMCPEntries           = 128
 
-	MaxGatewayFrameBytes      = 480 << 10
+	MaxGatewayFrameBytes      = acpbridge.MaxGatewayFrameBytes
 	MaxPendingGatewayRequests = 256
 	MaxGatewayEventQueue      = 128
 )
