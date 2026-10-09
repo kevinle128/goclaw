@@ -231,12 +231,96 @@ When `GOCLAW_*_API_KEY` environment variables are set, the gateway auto-onboards
 > For custom builds (Tailscale, Redis): `docker build --build-arg ENABLE_TSNET=true ...`
 > See the [Deployment Guide](https://docs.goclaw.sh/#deploy-docker-compose) for details.
 
+### Deploying this fork (build from source)
+
+> ⚠️ **Do not use `make up` / `docker compose pull` for this fork.** They pull the upstream
+> `ghcr.io/nextlevelbuilder/goclaw:latest` image, which migrates the database to a newer schema
+> than this fork supports. The fork then fails with
+> `Database schema (vNN) is newer than this binary`, and there is no downgrade path.
+> Always build the image locally with `docker compose build`.
+
+**First-time setup — two env files (both gitignored, keep secrets identical in both):**
+
+`.env` — read by Docker Compose (no `export` prefix):
+
+```bash
+GOCLAW_GATEWAY_TOKEN=<token>          # dashboard login; openssl rand -hex 16
+GOCLAW_ENCRYPTION_KEY=<key>           # AES key for stored API keys; openssl rand -hex 32 — never change once data exists
+POSTGRES_PASSWORD=goclaw
+POSTGRES_PORT=127.0.0.1:5632          # host port for Postgres, bound to localhost only
+GOCLAW_POSTGRES_DSN=postgres://goclaw:goclaw@postgres:5432/goclaw?sslmode=disable   # Docker-network host/port
+```
+
+`.env.local` — for running the `goclaw` binary/CLI on the host (`source .env.local && ./goclaw ...`):
+
+```bash
+export GOCLAW_POSTGRES_DSN=postgres://goclaw:goclaw@localhost:5632/goclaw?sslmode=disable
+export GOCLAW_GATEWAY_TOKEN=<same as .env>
+export GOCLAW_ENCRYPTION_KEY=<same as .env>
+export GOCLAW_TELEMETRY_ENABLED=true
+export GOCLAW_TELEMETRY_ENDPOINT=localhost:4317
+export GOCLAW_TELEMETRY_PROTOCOL=grpc
+export GOCLAW_TELEMETRY_INSECURE=true
+export GOCLAW_TELEMETRY_SERVICE_NAME=goclaw-gateway
+```
+
+Notes:
+- `GOCLAW_POSTGRES_DSN` must be set in `.env`: in this fork the `goclaw` block in
+  `docker-compose.postgres.yml` is commented out, so the overlay no longer injects it.
+- Inside Docker the DSN uses `postgres:5432` and OTel uses `jaeger:4317` (set by
+  `docker-compose.otel.yml`); `.env.local` uses the host-published `localhost:5632` / `localhost:4317`.
+- `POSTGRES_PASSWORD` only applies when the Postgres volume is first created. To change it later:
+  `$C exec postgres psql -U goclaw -d goclaw -c "ALTER USER goclaw PASSWORD '<new>'"`, update both files, then restart.
+
+**Build + start (also used for every update after `git pull`):**
+
+```bash
+export GOCLAW_VERSION=$(git rev-parse --short HEAD)
+C="docker compose -f docker-compose.yml -f docker-compose.postgres.yml -f docker-compose.otel.yml"
+$C build --pull goclaw
+$C up -d
+$C logs -f goclaw        # expect "schema check passed" + "OpenTelemetry OTLP export enabled"
+
+# After editing .env only (no code change):
+$C up -d --force-recreate goclaw
+```
+
+Migrations run automatically from the container entrypoint on every start (`goclaw upgrade`;
+check with `$C exec postgres psql -U goclaw -d goclaw -c "select * from schema_migrations"`).
+The web dashboard is embedded in the `goclaw` image (`ENABLE_EMBEDUI=true` by default) — no separate web container is needed. OTel requires
+building from source (`ENABLE_OTEL=true` build arg in `docker-compose.otel.yml`); drop
+`-f docker-compose.otel.yml` to run without Jaeger.
+
+**Endpoints:**
+
+| Service | URL |
+|---------|-----|
+| Dashboard + API | `http://localhost:18790` (login with `GOCLAW_GATEWAY_TOKEN` from `.env`) |
+| Jaeger UI | `http://localhost:16686` (no auth — keep it on a private network) |
+| Postgres | `127.0.0.1:5632` only |
+
+**Remote access via host Tailscale:** if the host already runs Tailscale, no extra overlay is
+needed — the published ports are reachable at the host's tailnet IP
+(`tailscale ip -4`), e.g. `http://<tailnet-ip>:18790`. `docker-compose.tailscale.yml`
+(embedded tsnet) is only for hosts without Tailscale and needs `GOCLAW_TSNET_AUTH_KEY`.
+
+**Recovering from an accidental upstream pull:** if the DB was migrated by the upstream image,
+the fork cannot use it. On a fresh install with no data, recreate the Postgres volume
+(⚠️ destroys all DB data — back up first with `pg_dump` otherwise):
+
+```bash
+$C down && docker volume rm goclaw_postgres-data && $C up -d
+```
+
 ## Updating
 
 ### Docker
 ```bash
 docker compose pull && docker compose up -d
 ```
+
+> **This fork:** do not pull — `git pull`, then rebuild as described in
+> [Deploying this fork](#deploying-this-fork-build-from-source).
 
 ### Binary (with embedded web UI)
 ```bash

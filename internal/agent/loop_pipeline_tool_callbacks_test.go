@@ -80,12 +80,13 @@ func TestMakeExecuteToolCall_EmitsToolCallEvent(t *testing.T) {
 	l := newTestLoopForToolCallbacks(col.onEvent)
 
 	req := &RunRequest{
-		RunID:      "run-1",
-		SessionKey: "sess-A",
-		UserID:     "u-1",
-		SenderID:   "sender-1",
-		Channel:    "ws",
-		RunKind:    "",
+		RunID:         "run-1",
+		ACPGeneration: 7,
+		SessionKey:    "sess-A",
+		UserID:        "u-1",
+		SenderID:      "sender-1",
+		Channel:       "ws",
+		RunKind:       "",
 	}
 	state := &pipeline.RunState{RunID: "run-1"}
 	tc := providers.ToolCall{ID: "tc-1", Name: "read_file", Arguments: map[string]any{"path": "/tmp/x"}}
@@ -112,12 +113,13 @@ func TestMakeExecuteToolRaw_EmitsToolCallEvent(t *testing.T) {
 	l := newTestLoopForToolCallbacks(col.onEvent)
 
 	req := &RunRequest{
-		RunID:      "run-2",
-		SessionKey: "sess-B",
-		UserID:     "u-2",
-		SenderID:   "sender-2",
-		Channel:    "ws",
-		RunKind:    "",
+		RunID:         "run-2",
+		ACPGeneration: 8,
+		SessionKey:    "sess-B",
+		UserID:        "u-2",
+		SenderID:      "sender-2",
+		Channel:       "ws",
+		RunKind:       "",
 	}
 	tc := providers.ToolCall{ID: "tc-2", Name: "write_file", Arguments: map[string]any{"path": "/tmp/y"}}
 
@@ -235,6 +237,9 @@ func assertToolCallPayload(t *testing.T, ev AgentEvent, tc providers.ToolCall, r
 	}
 	if ev.SessionKey != req.SessionKey {
 		t.Errorf("SessionKey: got %q, want %q", ev.SessionKey, req.SessionKey)
+	}
+	if ev.ACPGeneration != req.ACPGeneration {
+		t.Errorf("ACPGeneration: got %d, want %d", ev.ACPGeneration, req.ACPGeneration)
 	}
 	if ev.Channel != req.Channel {
 		t.Errorf("Channel: got %q, want %q", ev.Channel, req.Channel)

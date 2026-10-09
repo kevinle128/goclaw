@@ -24,7 +24,7 @@
 
 services:
   goclaw:
-    image: ghcr.io/nextlevelbuilder/goclaw:latest
+    image: buzz-goclaw/gateway:acp-current-request
     build:
       context: ${GOCLAW_DIR:-.}
       dockerfile: Dockerfile
