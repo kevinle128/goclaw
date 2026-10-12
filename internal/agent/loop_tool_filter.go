@@ -20,6 +20,11 @@ var imageGenToolDef = providers.ToolDefinition{Type: "image_generation"}
 // Returns tool definitions for the provider, an allowed-tools map for execution validation,
 // and the (potentially modified) messages slice when final-iteration stripping appends a hint.
 func (l *Loop) buildFilteredTools(req *RunRequest, hadBootstrap bool, iteration, maxIter int, messages []providers.Message) ([]providers.ToolDefinition, map[string]bool, []providers.Message) {
+	// The ACP run registry is a clone taken at run start. Tools that the agent
+	// registry activates later (mcp_tool_search) must reach the next iteration.
+	if req != nil && req.runRegistry != nil {
+		req.runRegistry.AddMissingFrom(l.registry)
+	}
 	registry := l.registryForRun(req)
 	// Build provider request with policy-filtered tools.
 	var toolDefs []providers.ToolDefinition

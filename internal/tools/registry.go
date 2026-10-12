@@ -414,6 +414,41 @@ func (r *Registry) Clone() *Registry {
 	return clone
 }
 
+// AddMissingFrom copies tools that exist in src but not in r.
+// Tools already in r are kept as they are, so run-scoped tools are never replaced.
+// A per-run clone uses this to pick up tools that src activated after the clone,
+// for example deferred MCP tools that mcp_tool_search activates mid-run.
+func (r *Registry) AddMissingFrom(src *Registry) {
+	if src == nil || src == r {
+		return
+	}
+	src.mu.RLock()
+	missing := make(map[string]Tool)
+	meta := make(map[string]ToolMetadata)
+	for name, tool := range src.tools {
+		missing[name] = tool
+		if m, ok := src.metadata[name]; ok {
+			meta[name] = m
+		}
+	}
+	src.mu.RUnlock()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name, tool := range missing {
+		if _, exists := r.tools[name]; exists {
+			continue
+		}
+		if _, exists := r.aliases[name]; exists {
+			continue
+		}
+		r.tools[name] = tool
+		if m, ok := meta[name]; ok {
+			r.metadata[name] = m
+		}
+	}
+}
+
 // RegisterToolGroup adds or replaces a dynamic tool group.
 // Used by the MCP manager to register "mcp" and "mcp:{serverName}" groups.
 func (r *Registry) RegisterToolGroup(name string, members []string) {

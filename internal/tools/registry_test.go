@@ -394,3 +394,45 @@ func TestRegistry_TryActivateDeferred_NilActivatorAfterSet(t *testing.T) {
 		t.Error("expected false after setting nil activator")
 	}
 }
+
+func TestRegistry_AddMissingFrom_PicksUpToolsActivatedAfterClone(t *testing.T) {
+	base := NewRegistry()
+	base.Register(&mockTool{name: "inline_tool"})
+	run := base.Clone()
+	runOnly := &mockTool{name: "run_tool"}
+	run.Register(runOnly)
+
+	// Simulates mcp_tool_search activating a deferred tool into the base registry mid-run.
+	base.Register(&mockTool{name: "activated_tool"})
+	if _, ok := run.Get("activated_tool"); ok {
+		t.Fatal("clone must not see base changes before sync")
+	}
+
+	run.AddMissingFrom(base)
+
+	if _, ok := run.Get("activated_tool"); !ok {
+		t.Fatal("activated tool missing from run registry after sync")
+	}
+	if got, _ := run.Get("run_tool"); got != runOnly {
+		t.Fatal("run-scoped tool must be kept")
+	}
+	if _, ok := base.Get("run_tool"); ok {
+		t.Fatal("run-scoped tool must not leak into base registry")
+	}
+}
+
+func TestRegistry_AddMissingFrom_KeepsExistingTool(t *testing.T) {
+	base := NewRegistry()
+	base.Register(&mockTool{name: "shared"})
+	run := NewRegistry()
+	runVersion := &mockTool{name: "shared"}
+	run.Register(runVersion)
+
+	run.AddMissingFrom(base)
+	run.AddMissingFrom(nil)
+	run.AddMissingFrom(run)
+
+	if got, _ := run.Get("shared"); got != runVersion {
+		t.Fatal("existing tool was replaced")
+	}
+}
