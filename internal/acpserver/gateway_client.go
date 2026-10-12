@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"strings"
@@ -25,6 +26,7 @@ var (
 	ErrGatewaySubscription    = errors.New("gateway subscription closed")
 	ErrGatewayEventOverflow   = errors.New("gateway event queue overflow")
 	ErrUnboundGatewayIdentity = errors.New("gateway returned an unbound identity")
+	ErrGatewayIdentityChanged = errors.New("gateway identity changed after reconnect")
 )
 
 // GatewayClientConfig contains the credentials and endpoint for one persistent
@@ -95,7 +97,26 @@ type gatewayCallResult struct {
 
 type gatewayPendingCall struct {
 	method string
+	conn   *gatewayConn
 	result chan gatewayCallResult
+}
+
+// gatewayConn is one authenticated WebSocket. When it drops, only the requests
+// and subscriptions that depend on it fail; the client dials a new one on demand.
+type gatewayConn struct {
+	ws       *websocket.Conn
+	done     chan struct{}
+	readDone chan struct{}
+	dropOnce sync.Once
+}
+
+func (gc *gatewayConn) isDone() bool {
+	select {
+	case <-gc.done:
+		return true
+	default:
+		return false
+	}
 }
 
 type gatewayRoute struct {
@@ -104,12 +125,15 @@ type gatewayRoute struct {
 }
 
 // GatewayClient multiplexes requests and session event subscriptions over one
-// WebSocket. It never replays requests.
+// WebSocket at a time. When the Gateway restarts, the next request dials and
+// authenticates a new WebSocket. It never replays requests.
 type GatewayClient struct {
 	config GatewayClientConfig
 
-	connMu sync.RWMutex
-	conn   *websocket.Conn
+	// dialMu serializes dials so concurrent callers share one reconnect.
+	dialMu  sync.Mutex
+	connMu  sync.RWMutex
+	current *gatewayConn
 
 	writeMu sync.Mutex
 	nextID  atomic.Uint64
@@ -123,29 +147,84 @@ type GatewayClient struct {
 	identityMu sync.RWMutex
 	identity   GatewayIdentity
 
-	closed      chan struct{}
-	readDone    chan struct{}
-	closeOnce   sync.Once
-	readStarted atomic.Bool
+	stopped  chan struct{}
+	stopOnce sync.Once
 }
 
 // NewGatewayClient creates a disconnected client.
 func NewGatewayClient(config GatewayClientConfig) *GatewayClient {
 	return &GatewayClient{
-		config:   config,
-		pending:  make(map[string]*gatewayPendingCall),
-		subs:     make(map[gatewayRoute]*GatewaySubscription),
-		closed:   make(chan struct{}),
-		readDone: make(chan struct{}),
+		config:  config,
+		pending: make(map[string]*gatewayPendingCall),
+		subs:    make(map[gatewayRoute]*GatewaySubscription),
+		stopped: make(chan struct{}),
 	}
 }
 
 // Connect opens the socket and completes Gateway authentication before any
 // application request can be sent.
 func (c *GatewayClient) Connect(ctx context.Context) error {
+	c.dialMu.Lock()
+	defer c.dialMu.Unlock()
+	if c.isStopped() {
+		return ErrGatewayClosed
+	}
+	_, err := c.dial(ctx)
+	return err
+}
+
+// EnsureConnected returns nil when a live connection exists, and otherwise
+// dials and authenticates a new one. Requests are never replayed.
+func (c *GatewayClient) EnsureConnected(ctx context.Context) error {
+	_, err := c.ensureConnected(ctx)
+	return err
+}
+
+func (c *GatewayClient) ensureConnected(ctx context.Context) (*gatewayConn, error) {
+	if gc := c.liveConn(); gc != nil {
+		return gc, nil
+	}
+	c.dialMu.Lock()
+	defer c.dialMu.Unlock()
+	if c.isStopped() {
+		return nil, ErrGatewayClosed
+	}
+	if gc := c.liveConn(); gc != nil {
+		return gc, nil
+	}
+	gc, err := c.dial(ctx)
+	if err != nil {
+		slog.Warn("acp.gateway.reconnect_failed", "error", err)
+		return nil, err
+	}
+	slog.Info("acp.gateway.reconnected")
+	return gc, nil
+}
+
+func (c *GatewayClient) liveConn() *gatewayConn {
+	c.connMu.RLock()
+	gc := c.current
+	c.connMu.RUnlock()
+	if gc == nil || gc.isDone() {
+		return nil
+	}
+	return gc
+}
+
+func (c *GatewayClient) isStopped() bool {
+	select {
+	case <-c.stopped:
+		return true
+	default:
+		return false
+	}
+}
+
+// dial opens and authenticates one WebSocket. The caller must hold dialMu.
+func (c *GatewayClient) dial(ctx context.Context) (*gatewayConn, error) {
 	wsURL, err := normalizeAndValidateGatewayURL(c.config.URL)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	dialer := *websocket.DefaultDialer
 	if strings.HasPrefix(wsURL, "ws://") {
@@ -154,48 +233,46 @@ func (c *GatewayClient) Connect(ctx context.Context) error {
 	}
 	conn, _, err := dialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
-		return fmt.Errorf("connect gateway: %w", err)
+		return nil, fmt.Errorf("connect gateway: %w", err)
 	}
-	c.connMu.Lock()
-	c.conn = conn
-	c.connMu.Unlock()
+	gc := &gatewayConn{ws: conn, done: make(chan struct{}), readDone: make(chan struct{})}
 
 	params, err := json.Marshal(map[string]string{"token": c.config.Token, "user_id": c.config.UserID})
 	if err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("marshal gateway connect: %w", err)
+		return nil, fmt.Errorf("marshal gateway connect: %w", err)
 	}
 	frame := protocol.RequestFrame{Type: protocol.FrameTypeRequest, ID: c.requestID(), Method: protocol.MethodConnect, Params: params}
-	if err := c.writeFrame(frame); err != nil {
+	if err := c.writeFrame(gc, frame); err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("send gateway connect: %w", err)
+		return nil, fmt.Errorf("send gateway connect: %w", err)
 	}
 	conn.SetReadLimit(MaxGatewayFrameBytes)
 	if err := conn.SetReadDeadline(time.Now().Add(GatewayReadTimeout)); err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("set gateway read deadline: %w", err)
+		return nil, fmt.Errorf("set gateway read deadline: %w", err)
 	}
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("read gateway connect: %w", err)
+		return nil, fmt.Errorf("read gateway connect: %w", err)
 	}
 	if len(data) > MaxGatewayFrameBytes {
 		_ = conn.Close()
-		return ErrGatewayFrameTooLarge
+		return nil, ErrGatewayFrameTooLarge
 	}
 	var response gatewayWireResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("decode gateway connect: %w", err)
+		return nil, fmt.Errorf("decode gateway connect: %w", err)
 	}
 	if response.Type != protocol.FrameTypeResponse || response.ID != frame.ID {
 		_ = conn.Close()
-		return errors.New("unexpected gateway connect response")
+		return nil, errors.New("unexpected gateway connect response")
 	}
 	if !response.OK {
 		_ = conn.Close()
-		return gatewayResponseError(response.Error)
+		return nil, gatewayResponseError(response.Error)
 	}
 	var payload struct {
 		UserID        string `json:"user_id"`
@@ -210,13 +287,20 @@ func (c *GatewayClient) Connect(ctx context.Context) error {
 	}
 	if err := json.Unmarshal(response.Payload, &payload); err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("decode gateway identity: %w", err)
+		return nil, fmt.Errorf("decode gateway identity: %w", err)
 	}
 	if strings.TrimSpace(payload.UserID) == "" || strings.TrimSpace(payload.TenantID) == "" {
 		_ = conn.Close()
-		return ErrUnboundGatewayIdentity
+		return nil, ErrUnboundGatewayIdentity
 	}
 	c.identityMu.Lock()
+	previous := c.identity
+	if previous.UserID != "" && (previous.UserID != payload.UserID || previous.TenantID != payload.TenantID) {
+		// The process was validated against the first identity; never switch principals silently.
+		c.identityMu.Unlock()
+		_ = conn.Close()
+		return nil, ErrGatewayIdentityChanged
+	}
 	c.identity = GatewayIdentity{
 		UserID: payload.UserID, TenantID: payload.TenantID, Role: payload.Role,
 		IsOwner: payload.IsOwner, IsMasterScope: payload.IsMasterScope,
@@ -225,10 +309,12 @@ func (c *GatewayClient) Connect(ctx context.Context) error {
 	c.identityMu.Unlock()
 	_ = conn.SetReadDeadline(time.Now().Add(GatewayReadTimeout))
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(GatewayReadTimeout)) })
-	c.readStarted.Store(true)
-	go c.readLoop(conn)
-	go c.pingLoop(conn)
-	return nil
+	c.connMu.Lock()
+	c.current = gc
+	c.connMu.Unlock()
+	go c.readLoop(gc)
+	go c.pingLoop(gc)
+	return gc, nil
 }
 
 // Identity returns the identity established by Connect.
@@ -262,13 +348,17 @@ func (c *GatewayClient) Call(ctx context.Context, method string, params, result 
 	if len(data) > MaxGatewayFrameBytes {
 		return ErrGatewayFrameTooLarge
 	}
-	pending := &gatewayPendingCall{method: method, result: make(chan gatewayCallResult, 1)}
+	gc, err := c.ensureConnected(ctx)
+	if err != nil {
+		return err
+	}
+	pending := &gatewayPendingCall{method: method, conn: gc, result: make(chan gatewayCallResult, 1)}
 	if err := c.reservePending(id, pending); err != nil {
 		return err
 	}
-	if err := c.writeData(data); err != nil {
+	if err := c.writeData(gc, data); err != nil {
 		c.removePending(id, pending)
-		c.shutdown(err)
+		c.drop(gc, err)
 		if method == protocol.MethodChatSend {
 			return errors.Join(ErrGatewayIndeterminate, err)
 		}
@@ -298,10 +388,8 @@ func (c *GatewayClient) Call(ctx context.Context, method string, params, result 
 func (c *GatewayClient) reservePending(id string, pending *gatewayPendingCall) error {
 	c.pendingMu.Lock()
 	defer c.pendingMu.Unlock()
-	select {
-	case <-c.closed:
+	if c.isStopped() || pending.conn.isDone() {
 		return ErrGatewayClosed
-	default:
 	}
 	if len(c.pending) >= MaxPendingGatewayRequests {
 		return ErrGatewayPendingLimit
@@ -343,49 +431,50 @@ func (c *GatewayClient) Subscribe(sessionID, sessionKey string, generation uint6
 	return sub, nil
 }
 
-func (c *GatewayClient) readLoop(conn *websocket.Conn) {
-	defer close(c.readDone)
+func (c *GatewayClient) readLoop(gc *gatewayConn) {
+	defer close(gc.readDone)
+	conn := gc.ws
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
-			c.shutdown(err)
+			c.drop(gc, err)
 			return
 		}
 		if len(data) > MaxGatewayFrameBytes {
-			c.shutdown(ErrGatewayFrameTooLarge)
+			c.drop(gc, ErrGatewayFrameTooLarge)
 			return
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(GatewayReadTimeout))
 		frameType, err := protocol.ParseFrameType(data)
 		if err != nil {
-			c.shutdown(errors.New("invalid gateway frame"))
+			c.drop(gc, errors.New("invalid gateway frame"))
 			return
 		}
 		switch frameType {
 		case protocol.FrameTypeResponse:
-			c.dispatchResponse(data)
+			c.dispatchResponse(gc, data)
 		case protocol.FrameTypeEvent:
 			c.dispatchEvent(data)
 		default:
-			c.shutdown(errors.New("unexpected gateway frame type"))
+			c.drop(gc, errors.New("unexpected gateway frame type"))
 			return
 		}
 	}
 }
 
-func (c *GatewayClient) pingLoop(conn *websocket.Conn) {
+func (c *GatewayClient) pingLoop(gc *gatewayConn) {
 	ticker := time.NewTicker(GatewayReadTimeout / 2)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-c.closed:
+		case <-gc.done:
 			return
 		case <-ticker.C:
 			c.writeMu.Lock()
-			err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(GatewayWriteTimeout))
+			err := gc.ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(GatewayWriteTimeout))
 			c.writeMu.Unlock()
 			if err != nil {
-				c.shutdown(err)
+				c.drop(gc, err)
 				return
 			}
 		}
@@ -400,10 +489,10 @@ type gatewayWireResponse struct {
 	Error   *protocol.ErrorShape `json:"error"`
 }
 
-func (c *GatewayClient) dispatchResponse(data []byte) {
+func (c *GatewayClient) dispatchResponse(gc *gatewayConn, data []byte) {
 	var response gatewayWireResponse
 	if json.Unmarshal(data, &response) != nil {
-		c.shutdown(errors.New("invalid gateway response"))
+		c.drop(gc, errors.New("invalid gateway response"))
 		return
 	}
 	c.pendingMu.Lock()
@@ -474,7 +563,7 @@ func (c *GatewayClient) requestID() string {
 	return fmt.Sprintf("acp-%d", c.nextID.Add(1))
 }
 
-func (c *GatewayClient) writeFrame(frame protocol.RequestFrame) error {
+func (c *GatewayClient) writeFrame(gc *gatewayConn, frame protocol.RequestFrame) error {
 	data, err := json.Marshal(frame)
 	if err != nil {
 		return err
@@ -482,48 +571,48 @@ func (c *GatewayClient) writeFrame(frame protocol.RequestFrame) error {
 	if len(data) > MaxGatewayFrameBytes {
 		return ErrGatewayFrameTooLarge
 	}
-	return c.writeData(data)
+	return c.writeData(gc, data)
 }
 
-func (c *GatewayClient) writeData(data []byte) error {
+func (c *GatewayClient) writeData(gc *gatewayConn, data []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	select {
-	case <-c.closed:
-		return ErrGatewayClosed
-	default:
-	}
-	c.connMu.RLock()
-	conn := c.conn
-	c.connMu.RUnlock()
-	if conn == nil {
+	if c.isStopped() || gc.isDone() {
 		return ErrGatewayClosed
 	}
-	if err := conn.SetWriteDeadline(time.Now().Add(GatewayWriteTimeout)); err != nil {
+	if err := gc.ws.SetWriteDeadline(time.Now().Add(GatewayWriteTimeout)); err != nil {
 		return err
 	}
-	return conn.WriteMessage(websocket.TextMessage, data)
+	return gc.ws.WriteMessage(websocket.TextMessage, data)
 }
 
-func (c *GatewayClient) shutdown(cause error) {
-	c.closeOnce.Do(func() {
-		close(c.closed)
-		c.connMu.RLock()
-		conn := c.conn
-		c.connMu.RUnlock()
-		if conn != nil {
-			_ = conn.Close()
+// drop closes one connection and fails the requests and subscriptions that
+// were waiting on it. The client stays usable; the next request reconnects.
+func (c *GatewayClient) drop(gc *gatewayConn, cause error) {
+	gc.dropOnce.Do(func() {
+		close(gc.done)
+		_ = gc.ws.Close()
+		c.connMu.Lock()
+		if c.current == gc {
+			c.current = nil
 		}
+		c.connMu.Unlock()
 		if cause == nil {
 			cause = ErrGatewayClosed
 		}
+		var failed []*gatewayPendingCall
 		c.pendingMu.Lock()
-		pending := c.pending
-		c.pending = make(map[string]*gatewayPendingCall)
+		for id, call := range c.pending {
+			if call.conn == gc {
+				failed = append(failed, call)
+				delete(c.pending, id)
+			}
+		}
 		c.pendingMu.Unlock()
-		for _, call := range pending {
+		for _, call := range failed {
 			call.result <- gatewayCallResult{err: cause}
 		}
+		// In-flight runs lose their event stream with the socket.
 		c.subMu.Lock()
 		subs := c.subs
 		c.subs = make(map[gatewayRoute]*GatewaySubscription)
@@ -534,14 +623,20 @@ func (c *GatewayClient) shutdown(cause error) {
 	})
 }
 
-// Close stops the connection and waits a bounded time for the read loop.
+// Close stops the client for good and waits a bounded time for the read loop.
 func (c *GatewayClient) Close() error {
-	c.shutdown(ErrGatewayClosed)
-	if !c.readStarted.Load() {
+	c.stopOnce.Do(func() { close(c.stopped) })
+	c.dialMu.Lock()
+	c.connMu.RLock()
+	gc := c.current
+	c.connMu.RUnlock()
+	c.dialMu.Unlock()
+	if gc == nil {
 		return nil
 	}
+	c.drop(gc, ErrGatewayClosed)
 	select {
-	case <-c.readDone:
+	case <-gc.readDone:
 		return nil
 	case <-time.After(GatewayCloseDrainTimeout):
 		return errors.New("gateway close timed out")

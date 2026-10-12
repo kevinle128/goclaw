@@ -539,3 +539,86 @@ func mustWriteJSON(t *testing.T, conn *websocket.Conn, value any) {
 		t.Errorf("WriteJSON() error = %v", err)
 	}
 }
+
+func waitGatewayDisconnected(t *testing.T, client *GatewayClient) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for client.liveConn() != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("client did not observe the disconnect")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestGatewayClientReconnectsAfterGatewayRestart(t *testing.T) {
+	var conns atomic.Int64
+	url := gatewayTestServer(t, func(conn *websocket.Conn) {
+		authenticateGatewayTestClient(t, conn)
+		if conns.Add(1) == 1 {
+			return // first socket closes, as when the Gateway container restarts
+		}
+		var req protocol.RequestFrame
+		mustReadJSON(t, conn, &req)
+		mustWriteJSON(t, conn, protocol.NewOKResponse(req.ID, map[string]string{"method": req.Method}))
+	})
+	client := connectGatewayTestClient(t, url)
+	defer client.Close()
+	waitGatewayDisconnected(t, client)
+
+	var result struct {
+		Method string `json:"method"`
+	}
+	if err := client.Call(context.Background(), "after.restart", nil, &result); err != nil {
+		t.Fatalf("Call() after restart error = %v", err)
+	}
+	if result.Method != "after.restart" {
+		t.Fatalf("result method = %q", result.Method)
+	}
+	if got := conns.Load(); got != 2 {
+		t.Fatalf("connections = %d, want 2", got)
+	}
+}
+
+func TestGatewayClientRejectsReconnectWithChangedIdentity(t *testing.T) {
+	var conns atomic.Int64
+	url := gatewayTestServer(t, func(conn *websocket.Conn) {
+		if conns.Add(1) == 1 {
+			authenticateGatewayTestClient(t, conn)
+			return
+		}
+		var req protocol.RequestFrame
+		mustReadJSON(t, conn, &req)
+		mustWriteJSON(t, conn, protocol.NewOKResponse(req.ID, map[string]any{"user_id": "other-user", "tenant_id": "tenant-1"}))
+	})
+	client := connectGatewayTestClient(t, url)
+	defer client.Close()
+	waitGatewayDisconnected(t, client)
+
+	err := client.EnsureConnected(context.Background())
+	if !errors.Is(err, ErrGatewayIdentityChanged) {
+		t.Fatalf("EnsureConnected() error = %v, want %v", err, ErrGatewayIdentityChanged)
+	}
+	if got := client.Identity().UserID; got != "user-1" {
+		t.Fatalf("identity user = %q, want user-1", got)
+	}
+}
+
+func TestGatewayClientDoesNotReconnectAfterClose(t *testing.T) {
+	var conns atomic.Int64
+	url := gatewayTestServer(t, func(conn *websocket.Conn) {
+		conns.Add(1)
+		authenticateGatewayTestClient(t, conn)
+		<-time.After(time.Second)
+	})
+	client := connectGatewayTestClient(t, url)
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := client.Call(context.Background(), "after.close", nil, nil); !errors.Is(err, ErrGatewayClosed) {
+		t.Fatalf("Call() after Close error = %v, want %v", err, ErrGatewayClosed)
+	}
+	if got := conns.Load(); got != 1 {
+		t.Fatalf("connections = %d, want 1", got)
+	}
+}

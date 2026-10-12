@@ -145,6 +145,11 @@ func (s *Server) handlePrompt(ctx context.Context, params PromptParams) (PromptR
 			slog.Warn("release ACP capability", "error", releaseErr)
 		}
 	}()
+	// Reconnect before the event route exists, so a Gateway restart between
+	// prompts does not fail the next prompt.
+	if err := s.gateway.EnsureConnected(promptCtx); err != nil {
+		return PromptResult{}, &RPCError{Code: CodeGatewayError, Message: "Gateway is unavailable"}
+	}
 	subscription, err := s.gateway.Subscribe(params.SessionID, record.SessionKey, generation)
 	if err != nil {
 		return PromptResult{}, err
