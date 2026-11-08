@@ -204,6 +204,9 @@ func openEventStream(ctx context.Context, sess *connSession, name string, args j
 	opts.ID = id
 	opts.Events = true
 	params := map[string]any{"name": name, "arguments": subscriptionArgs(args), "cursor": cursor}
+	// The cursor value is opaque server data; log only whether a stored
+	// position is used, so a resume after a restart can be checked.
+	slog.Debug("mcp.events.stream_open", "subscription_id", id, "event", name, "resume_from_cursor", cursor != nil)
 	go func() {
 		_, err := rawCall(streamCtx, sess.client, methodEventsStream, params, opts)
 		unregister()
