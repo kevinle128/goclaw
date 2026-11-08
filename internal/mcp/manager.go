@@ -43,11 +43,22 @@ type ServerStatus struct {
 // connParams stores connection parameters needed to re-establish a dead connection.
 // Populated during initial connectAndDiscover and used by tryReconnect.
 type connParams struct {
-	command string
-	args    []string
-	env     map[string]string
-	url     string
-	headers map[string]string
+	command  string
+	args     []string
+	env      map[string]string
+	url      string
+	headers  map[string]string
+	protocol ProtocolMode
+}
+
+// connSession is what goclaw learned about one client when it connected:
+// the protocol era, the server/discover essentials (modern only), and the
+// notification router of that client. A reconnect makes a new connSession.
+type connSession struct {
+	client   *mcpclient.Client
+	era      ProtocolEra
+	discover *DiscoverInfo // nil on legacy connections
+	router   *notificationRouter
 }
 
 // serverState tracks a single MCP server connection.
@@ -83,6 +94,22 @@ type serverState struct {
 	// before the fresh Initialize completes — leaving the pool to keep
 	// serving the dead session.
 	reconnPending atomic.Bool
+
+	// session holds the era, discover result, and router of the current
+	// client. It is swapped together with clientPtr on reconnect.
+	session atomic.Pointer[connSession]
+}
+
+// currentSession returns the session of the current client, or nil before
+// the first connect.
+func (ss *serverState) currentSession() *connSession { return ss.session.Load() }
+
+// era returns the protocol era of the current client (legacy before connect).
+func (ss *serverState) era() ProtocolEra {
+	if cs := ss.session.Load(); cs != nil {
+		return cs.era
+	}
+	return EraLegacy
 }
 
 // Manager orchestrates MCP server connections and tool registration.
@@ -124,6 +151,10 @@ type Manager struct {
 	// LoadForAgent("") for later per-request tool resolution. These servers are NOT
 	// connected at startup — connections are created per-user via pool.AcquireUser().
 	userCredServers []store.MCPAccessInfo
+
+	// taskStarter receives tasks that modern tools/call requests start
+	// (nil = report the task id and status as the tool result).
+	taskStarter TaskStarter
 }
 
 // ManagerOption configures the Manager.
@@ -156,6 +187,14 @@ func WithPool(p *Pool) ManagerOption {
 func WithGrantChecker(gc GrantChecker) ManagerOption {
 	return func(m *Manager) {
 		m.grantChecker = gc
+	}
+}
+
+// WithTaskStarter sets the hook that receives tasks started by modern
+// tools/call requests of the BridgeTools that this Manager registers.
+func WithTaskStarter(ts TaskStarter) ManagerOption {
+	return func(m *Manager) {
+		m.taskStarter = ts
 	}
 }
 
@@ -195,7 +234,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		// Config-path servers have no DB-backed Settings, so no tool hints.
 		// Also no grant-based tool filtering (allow/deny are nil) — config
 		// trust model is that the operator gates which servers are enabled.
-		if err := m.connectServer(ctx, name, cfg.Transport, cfg.Command, cfg.Args, cfg.Env, cfg.URL, headers, cfg.ToolPrefix, cfg.TimeoutSec, uuid.Nil, ToolHints{}, nil, nil); err != nil {
+		if err := m.connectServer(ctx, name, cfg.Transport, cfg.Command, cfg.Args, cfg.Env, cfg.URL, headers, cfg.ToolPrefix, cfg.TimeoutSec, uuid.Nil, ToolHints{}, nil, nil, ProtocolAuto); err != nil {
 			slog.Warn("mcp.server.connect_failed", "server", name, "error", err)
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
 		}
@@ -332,19 +371,20 @@ func (m *Manager) resolveServerCredentials(ctx context.Context, info store.MCPAc
 func (m *Manager) connectAndFilter(ctx context.Context, rs *resolvedServer) error {
 	srv := rs.info.Server
 	hints := ParseToolHints(srv.Settings)
+	protocol := ParseProtocolMode(srv.Settings)
 
 	if m.pool != nil && !rs.hasUserCreds {
 		// Pool mode: acquire shared connection, create per-agent BridgeTools
 		tid := store.TenantIDFromContext(ctx)
 		return m.connectViaPool(ctx, tid, srv.Name, srv.Transport, srv.Command,
 			rs.args, rs.env, srv.URL, rs.headers, srv.ToolPrefix, srv.TimeoutSec, srv.ID, hints,
-			rs.info.ToolAllow, rs.info.ToolDeny)
+			rs.info.ToolAllow, rs.info.ToolDeny, protocol)
 	}
 	// Per-agent mode: create per-agent connection
 	return m.connectServer(ctx, srv.Name, srv.Transport, srv.Command,
 		rs.args, rs.env, srv.URL, rs.headers,
 		srv.ToolPrefix, srv.TimeoutSec, srv.ID, hints,
-		rs.info.ToolAllow, rs.info.ToolDeny)
+		rs.info.ToolAllow, rs.info.ToolDeny, protocol)
 }
 
 // LoadForAgent connects MCP servers accessible by a specific agent+user.

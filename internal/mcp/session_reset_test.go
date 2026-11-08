@@ -58,16 +58,14 @@ func TestRequestForceReconnect_Dedup(t *testing.T) {
 	const concurrent = 20
 
 	for range concurrent {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// Inline the CAS half of requestForceReconnect — testing the
 			// real method would race the cleanup goroutine. The dedup
 			// guarantee lives entirely in the CAS, so this is faithful.
 			if ss.reconnPending.CompareAndSwap(false, true) {
 				attempted.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

@@ -131,10 +131,9 @@ func DiscoverTools(ctx context.Context, transportType, command string, args []st
 		}
 	}
 
-	initReq := mcpgo.InitializeRequest{}
-	initReq.Params.ProtocolVersion = mcpgo.LATEST_PROTOCOL_VERSION
-	initReq.Params.ClientInfo = mcpgo.Implementation{Name: "goclaw-discovery", Version: "1.0.0"}
-	if _, err := client.Initialize(ctx, initReq); err != nil {
+	// stdio stays on the legacy handshake: a server/discover probe on a stdio
+	// server that ignores unknown methods would use 5 s of the 15 s budget.
+	if _, err := client.Initialize(ctx, newInitializeRequest(transportType, ProtocolAuto, "goclaw-discovery")); err != nil {
 		return nil, fmt.Errorf("initialize: %w", err)
 	}
 

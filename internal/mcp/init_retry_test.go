@@ -21,7 +21,7 @@ func TestConnectAndDiscoverRetriesOnStdioInitFailure(t *testing.T) {
 		args = []string{"/C", "type", "NUL"}
 	}
 	_, _, err := connectAndDiscover(ctx, "test-retry", "stdio",
-		command, args, nil, "", nil, 2)
+		command, args, nil, "", nil, 2, ProtocolAuto)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -42,7 +42,7 @@ func TestConnectAndDiscoverNoRetryForSSE(t *testing.T) {
 
 	start := time.Now()
 	_, _, err := connectAndDiscover(ctx, "test-no-retry", "sse",
-		"", nil, nil, "http://127.0.0.1:1", nil, 10)
+		"", nil, nil, "http://127.0.0.1:1", nil, 10, ProtocolAuto)
 	elapsed := time.Since(start)
 
 	if err == nil {

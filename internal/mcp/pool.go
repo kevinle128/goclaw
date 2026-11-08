@@ -114,8 +114,10 @@ func userSlotKey(tenantID uuid.UUID, serverName string) string {
 // Acquire returns a shared connection for the named server scoped to a tenant.
 // If no connection exists, it connects using the provided config.
 // Blocks up to AcquireTimeout if pool is at MaxSize.
-func (p *Pool) Acquire(ctx context.Context, tenantID uuid.UUID, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, timeoutSec int) (*poolEntry, error) {
+// opts apply only when a new connection is made; a connected entry is reused as is.
+func (p *Pool) Acquire(ctx context.Context, tenantID uuid.UUID, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, timeoutSec int, opts ...ConnectOption) (*poolEntry, error) {
 	key := poolKey(tenantID, name)
+	cfg := applyConnectOptions(opts)
 
 	p.mu.Lock()
 	if entry, ok := p.servers[key]; ok && entry.state.connected.Load() {
@@ -149,7 +151,7 @@ func (p *Pool) Acquire(ctx context.Context, tenantID uuid.UUID, name, transportT
 	}
 
 	// Connect outside the lock (may be slow)
-	ss, mcpTools, err := connectAndDiscover(ctx, name, transportType, command, args, env, url, headers, timeoutSec)
+	ss, mcpTools, err := connectAndDiscover(ctx, name, transportType, command, args, env, url, headers, timeoutSec, cfg.protocol)
 	if err != nil {
 		// Return slot on failure
 		select {
@@ -198,8 +200,10 @@ func (p *Pool) Acquire(ctx context.Context, tenantID uuid.UUID, name, transportT
 // AcquireUser returns a per-user connection for the named server scoped to a tenant+user.
 // If no connection exists, it connects using the provided config.
 // Blocks up to UserAcquireTimeout if per-server user slot limit is reached.
-func (p *Pool) AcquireUser(ctx context.Context, tenantID uuid.UUID, name, userID, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, timeoutSec int) (*poolEntry, error) {
+// opts apply only when a new connection is made; a connected entry is reused as is.
+func (p *Pool) AcquireUser(ctx context.Context, tenantID uuid.UUID, name, userID, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, timeoutSec int, opts ...ConnectOption) (*poolEntry, error) {
 	key := UserPoolKey(tenantID, name, userID)
+	cfg := applyConnectOptions(opts)
 	slotKey := userSlotKey(tenantID, name)
 
 	p.mu.Lock()
@@ -242,7 +246,7 @@ func (p *Pool) AcquireUser(ctx context.Context, tenantID uuid.UUID, name, userID
 	}
 
 	// Connect outside the lock (may be slow)
-	ss, mcpTools, err := connectAndDiscover(ctx, name, transportType, command, args, env, url, headers, timeoutSec)
+	ss, mcpTools, err := connectAndDiscover(ctx, name, transportType, command, args, env, url, headers, timeoutSec, cfg.protocol)
 	if err != nil {
 		// Return slot on failure
 		select {
@@ -638,7 +642,7 @@ func (e *poolEntry) RequestForceReconnect() func(reason string) {
 }
 
 // poolHealthLoop is a standalone health loop for pool-managed connections.
-// After consecutive ping failures, it attempts a full reconnect by creating
+// After consecutive liveness failures (see checkLiveness), it attempts a full reconnect by creating
 // a fresh client, mirroring the Manager.tryReconnect slow path.
 func poolHealthLoop(ctx context.Context, ss *serverState) {
 	ticker := newHealthTicker()
@@ -657,7 +661,7 @@ func poolHealthLoop(ctx context.Context, ss *serverState) {
 				slog.Debug("mcp.pool.health_skip", "server", ss.name, "reason", "reconnect_pending")
 				continue
 			}
-			if err := ss.client.Ping(ctx); err != nil {
+			if err := checkLiveness(ctx, ss.client); err != nil {
 				if isMethodNotFound(err) {
 					ss.connected.Store(true)
 					ss.mu.Lock()
