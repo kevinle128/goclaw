@@ -28,18 +28,19 @@ import (
 )
 
 type options struct {
-	cwd          string
-	prompt       string
-	channelID    string
-	rootEventID  string
-	answers      []string
-	wakeReplies  []string
-	declareWake  bool
-	declareForm  bool
-	stopReasons  map[string]bool
-	timeout      time.Duration
-	logPath      string
-	adapterArgv  []string
+	cwd         string
+	prompt      string
+	channelID   string
+	rootEventID string
+	answers     []string
+	wakeReplies []string
+	declareWake bool
+	declareForm bool
+	stopReasons map[string]bool
+	timeout     time.Duration
+	logPath     string
+	maxTurns    int
+	adapterArgv []string
 }
 
 type frame struct {
@@ -89,6 +90,7 @@ func main() {
 	flag.StringVar(&stop, "stop-on", "completed,failed,cancelled", "wake reasons that end the run after their turn")
 	flag.DurationVar(&opts.timeout, "timeout", 20*time.Minute, "overall time limit")
 	flag.StringVar(&opts.logPath, "log", "/tmp/acpclient.jsonl", "JSONL frame log")
+	flag.IntVar(&opts.maxTurns, "max-turns", 0, "stop after this many turns (0 = no limit)")
 	flag.Parse()
 	opts.adapterArgv = flag.Args()
 	if len(opts.adapterArgv) == 0 || opts.cwd == "" || opts.prompt == "" {
@@ -147,11 +149,16 @@ func run(opts options) error {
 	c.prompts <- promptJob{text: opts.prompt, thread: thread}
 
 	var outcome string
+	turns := 0
 	for outcome == "" {
 		select {
 		case job := <-c.prompts:
 			if err := c.runTurn(ctx, job); err != nil {
 				c.note("turn_error", err.Error())
+			}
+			turns++
+			if opts.maxTurns > 0 && turns >= opts.maxTurns {
+				outcome = "max-turns"
 			}
 		case outcome = <-c.done:
 		case <-ctx.Done():
