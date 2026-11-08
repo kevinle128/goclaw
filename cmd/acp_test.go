@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/acpserver"
 )
@@ -93,6 +94,56 @@ func TestACPCommandPassesRequiredOptions(t *testing.T) {
 	if got.Agent != "coding-agent" || got.Owner != "user-1" || got.WorkspaceRoot != workspace || len(got.MCPExecRoots) != 1 || got.MCPExecRoots[0] != execRoot {
 		t.Fatalf("options = %#v", got)
 	}
+	if got.MaxPromptDuration != 2*time.Hour {
+		t.Fatalf("default max prompt duration = %v, want 2h", got.MaxPromptDuration)
+	}
+}
+
+func TestACPCommandParsesMaxPromptDuration(t *testing.T) {
+	oldRun := runACPCommand
+	t.Cleanup(func() { runACPCommand = oldRun })
+	var got acpOptions
+	runACPCommand = func(_ context.Context, options acpOptions, _ io.Reader, _, _ io.Writer) error {
+		got = options
+		return nil
+	}
+	cmd := acpCmd()
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{
+		"--agent", "coding-agent",
+		"--owner", "user-1",
+		"--tenant", "00000000-0000-0000-0000-000000000001",
+		"--workspace-root", t.TempDir(),
+		"--mcp-exec-root", t.TempDir(),
+		"--max-prompt-duration", "24h",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got.MaxPromptDuration != 24*time.Hour {
+		t.Fatalf("max prompt duration = %v, want 24h", got.MaxPromptDuration)
+	}
+}
+
+func TestResolveACPOptionsValidatesMaxPromptDuration(t *testing.T) {
+	t.Setenv("GOCLAW_ACP_API_KEY", "acp-secret")
+	for _, duration := range []time.Duration{time.Minute, 2 * time.Hour, 168 * time.Hour} {
+		options := validACPOptions(t)
+		options.MaxPromptDuration = duration
+		resolved, err := resolveACPOptions(options)
+		if err != nil || resolved.MaxPromptDuration != duration {
+			t.Errorf("resolveACPOptions(%v) = %v, %v", duration, resolved.MaxPromptDuration, err)
+		}
+	}
+	for _, duration := range []time.Duration{0, -time.Hour, 59 * time.Second, 168*time.Hour + time.Second} {
+		options := validACPOptions(t)
+		options.MaxPromptDuration = duration
+		if _, err := resolveACPOptions(options); err == nil || !strings.Contains(err.Error(), "max prompt duration") {
+			t.Errorf("resolveACPOptions(%v) error = %v, want range error", duration, err)
+		}
+	}
 }
 
 func TestRunACPCanonicalizesRootsAndKeepsStdoutProtocolOnly(t *testing.T) {
@@ -125,9 +176,10 @@ func TestRunACPCanonicalizesRootsAndKeepsStdoutProtocolOnly(t *testing.T) {
 	var stderr strings.Builder
 	err := runACP(context.Background(), acpOptions{
 		Agent: "coding-agent", Owner: "user-1",
-		Tenant:        "00000000-0000-0000-0000-000000000001",
-		WorkspaceRoot: workspace + string(os.PathSeparator) + ".",
-		MCPExecRoots:  []string{execRoot + string(os.PathSeparator) + "."},
+		Tenant:            "00000000-0000-0000-0000-000000000001",
+		WorkspaceRoot:     workspace + string(os.PathSeparator) + ".",
+		MCPExecRoots:      []string{execRoot + string(os.PathSeparator) + "."},
+		MaxPromptDuration: 2 * time.Hour,
 	}, strings.NewReader(""), &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("runACP() error = %v", err)
@@ -247,5 +299,6 @@ func validACPOptions(t *testing.T) acpOptions {
 		Agent: "coding-agent", Owner: "user-1",
 		Tenant:        "00000000-0000-0000-0000-000000000001",
 		WorkspaceRoot: t.TempDir(), MCPExecRoots: []string{t.TempDir()},
+		MaxPromptDuration: 2 * time.Hour,
 	}
 }

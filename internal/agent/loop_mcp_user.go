@@ -149,7 +149,8 @@ func (l *Loop) getUserMCPTools(ctx context.Context, userID string) []tools.Tool 
 
 		// Acquire user-keyed pool connection
 		entry, err := l.mcpPool.AcquireUser(ctx, l.tenantID, srv.Name, userID,
-			srv.Transport, srv.Command, args, env, srv.URL, headers, srv.TimeoutSec)
+			srv.Transport, srv.Command, args, env, srv.URL, headers, srv.TimeoutSec,
+			mcpbridge.WithProtocolMode(mcpbridge.ParseProtocolMode(srv.Settings)))
 		if err != nil {
 			if isUnauthorized401(err) {
 				expiresAt := strings.TrimSpace(uc.Env["BITRIX_EXPIRES_AT"])
@@ -195,6 +196,8 @@ func (l *Loop) getUserMCPTools(ctx context.Context, userID string) []tools.Tool 
 		// triggers the runtime "grant revoked" path (visible in the original
 		// agent_brain_external screenshot).
 		hints := mcpbridge.ParseToolHints(srv.Settings)
+		taskEvents := mcpbridge.ParseTaskEvents(srv.Settings)
+		taskStarter := l.mcpPool.TaskStarter()
 		var filteredOut []string
 		for _, mcpTool := range entry.MCPTools() {
 			if !mcpbridge.IsToolAllowed(mcpTool.Name, info.ToolAllow, info.ToolDeny) {
@@ -203,7 +206,9 @@ func (l *Loop) getUserMCPTools(ctx context.Context, userID string) []tools.Tool 
 			}
 			bt := mcpbridge.NewBridgeTool(srv.Name, mcpTool, entry.ClientPtr(), srv.ToolPrefix, srv.TimeoutSec, entry.Connected(), srv.ID, l.mcpGrantChecker).
 				WithHints(hints.Global, hints.HintFor(mcpTool.Name)).
-				WithForceReconnect(entry.RequestForceReconnect())
+				WithForceReconnect(entry.RequestForceReconnect()).
+				WithTaskStarter(taskStarter).
+				WithTaskEvents(taskEvents)
 			userTools = append(userTools, bt)
 		}
 		if len(filteredOut) > 0 {

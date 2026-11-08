@@ -208,7 +208,8 @@ func (m *SessionMCPManager) startServer(ctx context.Context, cwd string, definit
 		return nil, nil, errors.New("start MCP server failed")
 	}
 	initRequest := mcpgo.InitializeRequest{}
-	initRequest.Params.ProtocolVersion = mcpgo.LATEST_PROTOCOL_VERSION
+	// stdio stays on the 2025-11-25 handshake: no server/discover probe, which costs 5 s on a stdio server that ignores unknown methods.
+	initRequest.Params.ProtocolVersion = mcpgo.LATEST_LEGACY_PROTOCOL_VERSION
 	initRequest.Params.ClientInfo = mcpgo.Implementation{Name: "goclaw-acp", Version: "1"}
 	if _, err := client.Initialize(ctx, initRequest); err != nil {
 		_ = client.Close()

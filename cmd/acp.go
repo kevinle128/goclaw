@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -24,6 +25,8 @@ type acpOptions struct {
 	WorkspaceRoot string
 	MCPExecRoots  []string
 	APIKey        string
+	// MaxPromptDuration cancels a prompt that runs longer.
+	MaxPromptDuration time.Duration
 }
 
 type resolvedACPOptions struct {
@@ -60,6 +63,8 @@ func acpCmd() *cobra.Command {
 	command.Flags().StringVar(&options.WorkspaceRoot, "workspace-root", "", "allowed workspace root")
 	command.Flags().StringSliceVar(&options.MCPExecRoots, "mcp-exec-root", nil, "allowed MCP executable root (repeatable)")
 	command.Flags().StringVar(&options.APIKey, "api-key", "", "ACP-specific Gateway API key")
+	command.Flags().DurationVar(&options.MaxPromptDuration, "max-prompt-duration", acpserver.MaxPromptDurationDefault,
+		fmt.Sprintf("cancel a prompt that runs longer than this (%s to %s)", acpserver.MaxPromptDurationMin, acpserver.MaxPromptDurationMax))
 	for _, name := range []string{"agent", "owner", "tenant", "workspace-root", "mcp-exec-root"} {
 		if err := command.MarkFlagRequired(name); err != nil {
 			panic(err)
@@ -106,6 +111,9 @@ func resolveACPOptions(options acpOptions) (resolvedACPOptions, error) {
 		return resolvedACPOptions{}, errors.New("ACP tenant must be a non-zero UUID")
 	}
 	options.Tenant = tenantID.String()
+	if err := acpserver.ValidateMaxPromptDuration(options.MaxPromptDuration); err != nil {
+		return resolvedACPOptions{}, err
+	}
 	options.APIKey, err = resolveACPAPIKey(options.APIKey)
 	if err != nil {
 		return resolvedACPOptions{}, err
@@ -165,6 +173,7 @@ func newACPServer(ctx context.Context, options resolvedACPOptions) (acpRuntime, 
 	server, err := acpserver.NewServer(acpserver.ServerConfig{
 		Gateway: gateway, AgentID: options.Agent, WorkspaceRoot: options.WorkspaceRoot,
 		MCPExecRoots: options.MCPExecRoots, Version: Version,
+		MaxPromptDuration: options.MaxPromptDuration,
 	})
 	if err != nil {
 		return nil, errors.Join(err, gateway.Close())

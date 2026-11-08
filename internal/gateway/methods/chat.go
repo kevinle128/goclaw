@@ -18,6 +18,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
+	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -38,6 +39,7 @@ type ChatMethods struct {
 	usageCaps   *usagecaps.Service
 	debouncer   *chatDebouncer
 	acpManager  *acpbridge.Manager
+	inputRelays *acpbridge.InputRelays
 }
 
 func NewChatMethods(agents *agent.Router, sess store.SessionStore, cfg *config.Config, rl *gateway.RateLimiter, eventBus bus.EventPublisher) *ChatMethods {
@@ -61,6 +63,9 @@ func (m *ChatMethods) SetPostTurnProcessor(pt tools.PostTurnProcessor) {
 }
 
 func (m *ChatMethods) SetACPManager(manager *acpbridge.Manager) { m.acpManager = manager }
+
+// SetACPInputRelays sets the registry of in-turn input requests of ACP runs.
+func (m *ChatMethods) SetACPInputRelays(relays *acpbridge.InputRelays) { m.inputRelays = relays }
 
 func (m *ChatMethods) DiscardACPConnection(connectionID string) {
 	if m.debouncer == nil {
@@ -132,6 +137,18 @@ type chatSendParams struct {
 	Media         json.RawMessage `json:"media,omitempty"` // []string (legacy) or []chatMediaItem
 	ACPGeneration uint64          `json:"acpGeneration,omitempty"`
 	TerminalMode  string          `json:"terminalMode,omitempty"`
+	// ACPClient describes the ACP client of an ACP prompt. An older adapter
+	// does not send it; then the run gets no ACP origin and no input relay.
+	ACPClient *chatACPClient `json:"acpClient,omitempty"`
+}
+
+// chatACPClient is the acpClient param of chat.send.
+type chatACPClient struct {
+	ElicitationForm bool `json:"elicitationForm"`
+	Wake            bool `json:"wake"`
+	// Thread is the opaque thread object of the ACP turn, or absent.
+	Thread       json.RawMessage `json:"thread,omitempty"`
+	ACPSessionID string          `json:"acpSessionId"`
 }
 
 // parseMedia handles both legacy string paths and new {path,filename} objects.
@@ -317,6 +334,7 @@ func (m *ChatMethods) dispatchChatSends(requests []chatSendRequest) {
 	if userID != "" {
 		runCtxBase = store.WithUserID(runCtxBase, userID)
 	}
+	runCtxBase = m.acpRunContext(runCtxBase, primary, params)
 	// Inject team dispatch tracker: gates team_tasks create (must search/list first)
 	// and defers task dispatch to post-turn.
 	runCtxBase, drainTeamDispatch := tools.InjectTeamDispatch(runCtxBase, m.postTurn)
@@ -668,4 +686,33 @@ func (m *ChatMethods) handleAbort(ctx context.Context, client *gateway.Client, r
 		"unauthorized":    respUnauthorized > 0,
 		"runIds":          runIDs,
 	}))
+}
+
+// acpRunContext adds the ACP client context of an ACP prompt to the run
+// context: the ACP origin (session id and thread) for task wakes, the form
+// elicitation flag for MCP requests, and an input relay bound to the owner
+// connection, session key and generation of the run. A run without an owner
+// connection or without acpClient gets nothing.
+func (m *ChatMethods) acpRunContext(ctx context.Context, primary chatSendRequest, params chatSendParams) context.Context {
+	acpClient := params.ACPClient
+	if acpClient == nil || params.ACPGeneration == 0 || primary.ownerConnectionID == "" || primary.client == nil {
+		return ctx
+	}
+	// Only a client that accepts wake requests gets an ACP origin. Without it
+	// no wake can reach the thread, so the task must not promise one.
+	if acpClient.Wake {
+		ctx = mcpbridge.WithACPOrigin(ctx, mcpbridge.ACPOrigin{SessionID: acpClient.ACPSessionID, Thread: acpClient.Thread})
+	}
+	canAskForm := acpClient.ElicitationForm && m.inputRelays != nil
+	ctx = mcpbridge.WithElicitationForm(ctx, canAskForm)
+	if m.inputRelays != nil {
+		ctx = mcpbridge.WithInputRelay(ctx, m.inputRelays.Bind(acpbridge.InputBinding{
+			ConnectionID: primary.ownerConnectionID,
+			SessionKey:   primary.sessionKey,
+			Generation:   params.ACPGeneration,
+			Sender:       primary.client,
+			CanAskForm:   canAskForm,
+		}))
+	}
+	return ctx
 }

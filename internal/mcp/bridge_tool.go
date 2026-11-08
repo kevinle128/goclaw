@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	mcpclient "github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
@@ -39,9 +40,9 @@ func argMapKeys(m map[string]any) string {
 // safe reconnection without data races.
 type BridgeTool struct {
 	serverName        string
-	serverID          uuid.UUID    // MCP server ID (for grant recheck)
-	toolName          string       // original MCP tool name
-	registeredName    string       // may include prefix: "{prefix}__{toolName}"
+	serverID          uuid.UUID // MCP server ID (for grant recheck)
+	toolName          string    // original MCP tool name
+	registeredName    string    // may include prefix: "{prefix}__{toolName}"
 	description       string
 	descriptionSuffix string         // admin-authored hints appended to description (see WithHints)
 	inputSchema       map[string]any // JSON Schema for parameters
@@ -54,6 +55,14 @@ type BridgeTool struct {
 	// the server reset its session lifecycle. Optional — nil falls back to
 	// "connected=false + wait for health loop". Wired via WithForceReconnect.
 	forceReconnect func(reason string)
+	// taskStarter receives tasks that a modern tools/call starts. Optional —
+	// nil reports the task id and status as the tool result.
+	taskStarter TaskStarter
+	// taskEvents is the server setting task_events (nil = not set).
+	taskEvents *TaskEventsBinding
+	// taskForbidden is true when the tool declares execution.taskSupport
+	// "forbidden": it never returns a task.
+	taskForbidden bool
 }
 
 // NewBridgeTool creates a BridgeTool from an MCP Tool definition.
@@ -90,6 +99,7 @@ func NewBridgeTool(serverName string, mcpTool mcpgo.Tool, clientPtr *atomic.Poin
 		timeoutSec:     timeoutSec,
 		connected:      connected,
 		grantChecker:   grantChecker,
+		taskForbidden:  mcpTool.Execution != nil && mcpTool.Execution.TaskSupport == mcpgo.TaskSupportForbidden,
 	}
 }
 
@@ -134,6 +144,21 @@ func (t *BridgeTool) WithForceReconnect(fn func(reason string)) *BridgeTool {
 	return t
 }
 
+// WithTaskStarter attaches the hook that receives tasks started by a modern
+// tools/call (see TaskStarter). nil keeps the default task-started text.
+func (t *BridgeTool) WithTaskStarter(ts TaskStarter) *BridgeTool {
+	t.taskStarter = ts
+	return t
+}
+
+// WithTaskEvents attaches the server setting task_events (see
+// ParseTaskEvents). With it, a modern tools/call that may start a task first
+// sends events/poll to get a cursor for the task watcher. nil disables it.
+func (t *BridgeTool) WithTaskEvents(b *TaskEventsBinding) *BridgeTool {
+	t.taskEvents = b
+	return t
+}
+
 // WithHints attaches admin-authored description hints to this tool. Hints are
 // appended to Description() so the LLM sees server-specific quirks (e.g. "no
 // trailing semicolons in code args") without modifying the upstream MCP server.
@@ -171,11 +196,15 @@ func (t *BridgeTool) OriginalName() string { return t.toolName }
 func (t *BridgeTool) IsConnected() bool { return t.connected.Load() }
 
 // isUnauthorizedErr detects HTTP 401 responses bubbled up through the mcp-go
-// streamable-http transport. The transport surfaces HTTP errors as wrapped
-// Go errors with the status code in the message; check both common phrasings.
+// transports. mcp-go returns AuthorizationRequiredError ("authorization
+// required") for a 401; older versions returned ErrUnauthorized. Text
+// phrasings are kept for errors that lost their type.
 func isUnauthorizedErr(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, transport.ErrAuthorizationRequired) || errors.Is(err, transport.ErrUnauthorized) {
+		return true
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "unauthorized (401)") ||
@@ -242,61 +271,79 @@ func (t *BridgeTool) Execute(ctx context.Context, args map[string]any) *tools.Re
 		"args_keys", argMapKeys(cleanedArgs),
 	)
 
+	if eraFromVersion(client.ProtocolVersion()) == EraModern {
+		return t.executeModern(ctx, callCtx, client, cleanedArgs, callStart)
+	}
+
 	result, err := client.CallTool(callCtx, req)
 	latencyMs := time.Since(callStart).Milliseconds()
 	if err != nil {
-		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
-			return tools.ErrorResult(fmt.Sprintf("MCP tool %q timeout after %ds", t.registeredName, t.timeoutSec))
-		}
-		// C4 fix: detect 401 Unauthorized from MCP transport. Flip connected=false
-		// so the next user event triggers getUserMCPTools to clear the cache and
-		// re-acquire — which (in loop_mcp_user.go) detects the same 401 against
-		// the fresh pool and purges DeleteUserCredentials → next-next event auto
-		// re-onboards via provisioner. Without this flip, BridgeTool would keep
-		// hitting the revoked api_key on every retry until pool idle-evicts (15m).
-		if isUnauthorizedErr(err) {
-			t.connected.Store(false)
-			slog.Warn("mcp.tool.call.auth_expired",
-				"server", t.serverName, "tool", t.registeredName,
-				"user_id", store.UserIDFromContext(ctx),
-				"latency_ms", latencyMs)
-			return tools.ErrorResult(fmt.Sprintf("MCP tool %q: credential expired, please retry", t.registeredName))
-		}
-		// Detect server-side session reset (FastMCP "invalid during session
-		// initialization", mcp-go ErrSessionTerminated, etc.). Trigger an
-		// out-of-band Initialize so the next agent turn finds a healthy
-		// client; return retry hint to the LLM for the current turn.
-		if isSessionUninitializedErr(err) {
-			slog.Warn("mcp.tool.call.session_reset",
-				"server", t.serverName, "tool", t.registeredName,
-				"user_id", store.UserIDFromContext(ctx),
-				"agent_id", store.AgentIDFromContext(ctx),
-				"latency_ms", latencyMs,
-				"error", err.Error(),
-				"action", "force_reconnect_requested")
-			if t.forceReconnect != nil {
-				t.forceReconnect("bridge_tool: " + t.registeredName)
-			} else {
-				// Best-effort fallback: flip connected so the next pool
-				// Acquire takes the reconnect branch. Less reliable than
-				// the explicit force-reconnect path (see WithForceReconnect).
-				t.connected.Store(false)
-			}
-			return tools.ErrorResult(fmt.Sprintf(
-				"MCP tool %q: server %q reset its session — reconnecting in background, please retry",
-				t.registeredName, t.serverName))
-		}
-		slog.Warn("mcp.tool.call.error",
-			"server", t.serverName, "tool", t.registeredName,
-			"user_id", store.UserIDFromContext(ctx),
-			"latency_ms", latencyMs, "error", err.Error())
-		return tools.ErrorResult(fmt.Sprintf("MCP tool %q error: %v", t.registeredName, err))
+		return t.callErrorResult(ctx, callCtx, err, latencyMs, EraLegacy)
 	}
 	slog.Debug("mcp.tool.call.done",
 		"server", t.serverName, "tool", t.registeredName,
 		"user_id", store.UserIDFromContext(ctx),
 		"latency_ms", latencyMs, "is_error", result.IsError)
 
+	return t.toolResult(result)
+}
+
+// callErrorResult turns a tools/call transport or protocol error into the
+// tool result. era selects the session-reset check: only legacy connections
+// have sessions. On a modern connection an HTTP 404 means "method not found",
+// so it must not start a reconnect.
+func (t *BridgeTool) callErrorResult(ctx, callCtx context.Context, err error, latencyMs int64, era ProtocolEra) *tools.Result {
+	if errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+		return tools.ErrorResult(fmt.Sprintf("MCP tool %q timeout after %ds", t.registeredName, t.timeoutSec))
+	}
+	// C4 fix: detect 401 Unauthorized from MCP transport. Flip connected=false
+	// so the next user event triggers getUserMCPTools to clear the cache and
+	// re-acquire — which (in loop_mcp_user.go) detects the same 401 against
+	// the fresh pool and purges DeleteUserCredentials → next-next event auto
+	// re-onboards via provisioner. Without this flip, BridgeTool would keep
+	// hitting the revoked api_key on every retry until pool idle-evicts (15m).
+	if isUnauthorizedErr(err) {
+		t.connected.Store(false)
+		slog.Warn("mcp.tool.call.auth_expired",
+			"server", t.serverName, "tool", t.registeredName,
+			"user_id", store.UserIDFromContext(ctx),
+			"latency_ms", latencyMs)
+		return tools.ErrorResult(fmt.Sprintf("MCP tool %q: credential expired, please retry", t.registeredName))
+	}
+	// Detect server-side session reset (FastMCP "invalid during session
+	// initialization", mcp-go ErrSessionTerminated, etc.). Trigger an
+	// out-of-band Initialize so the next agent turn finds a healthy
+	// client; return retry hint to the LLM for the current turn.
+	if era == EraLegacy && isSessionUninitializedErr(err) {
+		slog.Warn("mcp.tool.call.session_reset",
+			"server", t.serverName, "tool", t.registeredName,
+			"user_id", store.UserIDFromContext(ctx),
+			"agent_id", store.AgentIDFromContext(ctx),
+			"latency_ms", latencyMs,
+			"error", err.Error(),
+			"action", "force_reconnect_requested")
+		if t.forceReconnect != nil {
+			t.forceReconnect("bridge_tool: " + t.registeredName)
+		} else {
+			// Best-effort fallback: flip connected so the next pool
+			// Acquire takes the reconnect branch. Less reliable than
+			// the explicit force-reconnect path (see WithForceReconnect).
+			t.connected.Store(false)
+		}
+		return tools.ErrorResult(fmt.Sprintf(
+			"MCP tool %q: server %q reset its session — reconnecting in background, please retry",
+			t.registeredName, t.serverName))
+	}
+	slog.Warn("mcp.tool.call.error",
+		"server", t.serverName, "tool", t.registeredName,
+		"user_id", store.UserIDFromContext(ctx),
+		"latency_ms", latencyMs, "era", era.String(), "error", err.Error())
+	return tools.ErrorResult(fmt.Sprintf("MCP tool %q error: %v", t.registeredName, err))
+}
+
+// toolResult converts a complete CallToolResult into the tool result: text
+// extraction, error flags, and the untrusted-content wrapper.
+func (t *BridgeTool) toolResult(result *mcpgo.CallToolResult) *tools.Result {
 	text := extractTextContent(result)
 
 	if result.IsError {

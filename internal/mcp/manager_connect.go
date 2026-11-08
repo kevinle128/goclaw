@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -17,24 +18,20 @@ import (
 // discovers tools. Returns a connected serverState with discovered tool
 // definitions. The caller is responsible for registering tools and starting
 // the health loop. This function is shared by both Manager and Pool.
-func connectAndDiscover(ctx context.Context, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, timeoutSec int) (*serverState, []mcpgo.Tool, error) {
+// protocol is the server setting "protocol"; stdio is always legacy-only.
+func connectAndDiscover(ctx context.Context, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, timeoutSec int, protocol ProtocolMode) (*serverState, []mcpgo.Tool, error) {
 	client, err := createClient(transportType, command, args, env, url, headers)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create client: %w", err)
 	}
+	// Attach before Start so that no stream frame can arrive unrouted.
+	router := attachNotificationRouter(client)
 
 	if transportType != "stdio" {
 		if err := client.Start(ctx); err != nil {
 			_ = client.Close()
 			return nil, nil, fmt.Errorf("start transport: %w", err)
 		}
-	}
-
-	initReq := mcpgo.InitializeRequest{}
-	initReq.Params.ProtocolVersion = mcpgo.LATEST_PROTOCOL_VERSION
-	initReq.Params.ClientInfo = mcpgo.Implementation{
-		Name:    "goclaw",
-		Version: "1.0.0",
 	}
 
 	// Retry initialization with exponential backoff for slow-starting stdio servers.
@@ -44,6 +41,7 @@ func connectAndDiscover(ctx context.Context, name, transportType, command string
 	// this because the HTTP server rejects connections until ready (connection refused).
 	const maxInitAttempts = 4 // backoff: 2s + 4s + 8s = ~14s total before giving up
 	var initErr error
+	var initResult *mcpgo.InitializeResult
 	for attempt := range maxInitAttempts {
 		if attempt > 0 {
 			backoff := time.Duration(1<<attempt) * time.Second // 2s, 4s, 8s
@@ -55,26 +53,27 @@ func connectAndDiscover(ctx context.Context, name, transportType, command string
 				return nil, nil, fmt.Errorf("initialize: context cancelled during retry: %w", ctx.Err())
 			}
 		}
-		if _, err := client.Initialize(ctx, initReq); err == nil {
+		res, err := client.Initialize(ctx, newInitializeRequest(transportType, protocol, clientInfoName))
+		if err == nil {
 			initErr = nil
+			initResult = res
 			break
-		} else {
-			initErr = err
-			// Non-stdio transports: connection errors are definitive, don't retry.
-			if transportType != "stdio" {
-				break
-			}
+		}
+		initErr = err
+		// Non-stdio transports: connection errors are definitive, don't retry.
+		if transportType != "stdio" {
+			break
 		}
 	}
 	if initErr != nil {
 		_ = client.Close()
-		return nil, nil, fmt.Errorf("initialize: %w", initErr)
+		return nil, nil, fmt.Errorf("initialize: %w", markUnauthorized(initErr))
 	}
 
 	toolsResult, err := client.ListTools(ctx, mcpgo.ListToolsRequest{})
 	if err != nil {
 		_ = client.Close()
-		return nil, nil, fmt.Errorf("list tools: %w", err)
+		return nil, nil, fmt.Errorf("list tools: %w", markUnauthorized(err))
 	}
 
 	if timeoutSec <= 0 {
@@ -87,17 +86,92 @@ func connectAndDiscover(ctx context.Context, name, transportType, command string
 		client:     client,
 		timeoutSec: timeoutSec,
 		conn: connParams{
-			command: command,
-			args:    args,
-			env:     env,
-			url:     url,
-			headers: headers,
+			command:  command,
+			args:     args,
+			env:      env,
+			url:      url,
+			headers:  headers,
+			protocol: protocol,
 		},
 	}
+	ss.session.Store(newConnSession(client, initResult, router))
 	ss.clientPtr.Store(client)
 	ss.connected.Store(true)
 
+	slog.Debug("mcp.server.protocol",
+		"server", name,
+		"transport", transportType,
+		"protocol_version", client.ProtocolVersion(),
+		"era", ss.era().String(),
+		"setting", string(protocol))
+
 	return ss, toolsResult.Tools, nil
+}
+
+// newInitializeRequest builds the Initialize request. A legacy-only
+// connection asks for 2025-11-25: mcp-go then skips the server/discover
+// probe and runs the initialize handshake at once. Otherwise the client asks
+// for the newest version, probes server/discover, and falls back to
+// initialize for a legacy server.
+//
+// No extensions are declared here. mcp-go copies the Initialize capabilities
+// into the _meta of every typed request, and a typed CallTool cannot decode a
+// task result. goclaw declares tasks and events only on raw requests.
+func newInitializeRequest(transportType string, protocol ProtocolMode, clientName string) mcpgo.InitializeRequest {
+	req := mcpgo.InitializeRequest{}
+	req.Params.ProtocolVersion = mcpgo.LATEST_PROTOCOL_VERSION
+	if legacyOnly(transportType, protocol) {
+		req.Params.ProtocolVersion = mcpgo.LATEST_LEGACY_PROTOCOL_VERSION
+	}
+	req.Params.ClientInfo = mcpgo.Implementation{Name: clientName, Version: clientInfoVersion}
+	return req
+}
+
+// newConnSession records the era and the discover essentials of a client
+// after Initialize.
+func newConnSession(client *mcpclient.Client, res *mcpgo.InitializeResult, router *notificationRouter) *connSession {
+	cs := &connSession{client: client, era: eraFromVersion(client.ProtocolVersion()), router: router}
+	if cs.era == EraModern {
+		info := &DiscoverInfo{ProtocolVersion: client.ProtocolVersion(), Capabilities: client.GetServerCapabilities()}
+		if res != nil {
+			info.ServerInfo = res.ServerInfo
+			info.Instructions = res.Instructions
+		}
+		cs.discover = info
+	}
+	return cs
+}
+
+// markUnauthorized keeps the text "unauthorized (401)" in errors from an HTTP
+// 401. mcp-go reports a 401 as "authorization required", and callers (for
+// example the per-user credential purge) match the older text.
+func markUnauthorized(err error) error {
+	if err == nil || strings.Contains(strings.ToLower(err.Error()), "unauthorized (401)") {
+		return err
+	}
+	if errors.Is(err, transport.ErrAuthorizationRequired) || errors.Is(err, transport.ErrUnauthorized) {
+		return fmt.Errorf("unauthorized (401): %w", err)
+	}
+	return err
+}
+
+// livenessTimeout bounds one modern liveness probe.
+const livenessTimeout = 5 * time.Second
+
+// checkLiveness asks the server whether it is alive. Legacy connections send
+// ping. On a modern connection mcp-go's Ping sends nothing (the method was
+// removed in 2026-07-28), so goclaw sends server/discover with a 5 s deadline.
+func checkLiveness(ctx context.Context, client *mcpclient.Client) error {
+	if client == nil {
+		return errors.New("no client")
+	}
+	if eraFromVersion(client.ProtocolVersion()) != EraModern {
+		return client.Ping(ctx)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, livenessTimeout)
+	defer cancel()
+	_, err := client.Discover(probeCtx, mcpgo.DiscoverRequest{})
+	return err
 }
 
 // connectServer creates a client, initializes the connection, discovers tools, and registers them.
@@ -106,14 +180,15 @@ func connectAndDiscover(ctx context.Context, name, transportType, command string
 // pass a zero-value ToolHints{} for config-path servers or when no hints are configured.
 // toolAllow/toolDeny come from the agent's grant — non-allowed tools are filtered out
 // upfront so the LLM never sees tools it cannot call. Pass nil for config-path servers.
-func (m *Manager) connectServer(ctx context.Context, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string) error {
-	ss, mcpTools, err := connectAndDiscover(ctx, name, transportType, command, args, env, url, headers, timeoutSec)
+// taskEvents is the server setting task_events (nil when not set).
+func (m *Manager) connectServer(ctx context.Context, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string, protocol ProtocolMode, taskEvents *TaskEventsBinding) error {
+	ss, mcpTools, err := connectAndDiscover(ctx, name, transportType, command, args, env, url, headers, timeoutSec, protocol)
 	if err != nil {
 		return err
 	}
 
 	// Register tools (filtered by grant's tool_allow/tool_deny upfront)
-	registeredNames := m.registerBridgeTools(ss, mcpTools, name, toolPrefix, timeoutSec, serverID, hints, toolAllow, toolDeny)
+	registeredNames := m.registerBridgeTools(ss, mcpTools, name, toolPrefix, timeoutSec, serverID, hints, toolAllow, toolDeny, taskEvents)
 	ss.toolNames = registeredNames
 
 	// Create health monitoring context
@@ -149,7 +224,7 @@ func (m *Manager) connectServer(ctx context.Context, name, transportType, comman
 // never get a BridgeTool created — the LLM never sees them, eliminating the
 // "registered then runtime-denied" loop that produced repeated grant-revoked
 // errors. Pass nil/nil to register every discovered tool.
-func (m *Manager) registerBridgeTools(ss *serverState, mcpTools []mcpgo.Tool, serverName, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string) []string {
+func (m *Manager) registerBridgeTools(ss *serverState, mcpTools []mcpgo.Tool, serverName, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string, taskEvents *TaskEventsBinding) []string {
 	var registeredNames []string
 	var filteredOut []string
 	for _, mcpTool := range mcpTools {
@@ -160,7 +235,9 @@ func (m *Manager) registerBridgeTools(ss *serverState, mcpTools []mcpgo.Tool, se
 
 		bt := NewBridgeTool(serverName, mcpTool, &ss.clientPtr, toolPrefix, timeoutSec, &ss.connected, serverID, m.grantChecker).
 			WithHints(hints.Global, hints.HintFor(mcpTool.Name)).
-			WithForceReconnect(func(reason string) { ss.requestForceReconnect(reason) })
+			WithForceReconnect(func(reason string) { ss.requestForceReconnect(reason) }).
+			WithTaskStarter(m.starter()).
+			WithTaskEvents(taskEvents)
 
 		if _, exists := m.registry.Get(bt.Name()); exists {
 			slog.Warn("mcp.tool.name_collision",
@@ -194,14 +271,14 @@ func (m *Manager) registerBridgeTools(ss *serverState, mcpTools []mcpgo.Tool, se
 // description hints from MCPServerData.Settings.tool_hints.
 // toolAllow/toolDeny come from the agent's grant — non-allowed tools are filtered
 // out upfront so the LLM never sees tools it cannot call.
-func (m *Manager) connectViaPool(ctx context.Context, tenantID uuid.UUID, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string) error {
-	entry, err := m.pool.Acquire(ctx, tenantID, name, transportType, command, args, env, url, headers, timeoutSec)
+func (m *Manager) connectViaPool(ctx context.Context, tenantID uuid.UUID, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string, protocol ProtocolMode, taskEvents *TaskEventsBinding) error {
+	entry, err := m.pool.Acquire(ctx, tenantID, name, transportType, command, args, env, url, headers, timeoutSec, WithProtocolMode(protocol))
 	if err != nil {
 		return err
 	}
 
 	// Create per-agent BridgeTools from the pool's shared connection
-	registeredNames := m.registerPoolBridgeTools(entry, name, toolPrefix, timeoutSec, serverID, hints, toolAllow, toolDeny)
+	registeredNames := m.registerPoolBridgeTools(entry, name, toolPrefix, timeoutSec, serverID, hints, toolAllow, toolDeny, taskEvents)
 
 	// Track server state and per-agent tool names.
 	// poolServers/poolToolNames keyed by plain name for Close() iteration.
@@ -242,7 +319,7 @@ func (m *Manager) connectViaPool(ctx context.Context, tenantID uuid.UUID, name, 
 // hints.Global applies to all tools; hints.Tools[name] adds a per-tool hint.
 // toolAllow/toolDeny are evaluated via IsToolAllowed so filtered-out tools never
 // get a BridgeTool created (LLM never sees them).
-func (m *Manager) registerPoolBridgeTools(entry *poolEntry, serverName, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string) []string {
+func (m *Manager) registerPoolBridgeTools(entry *poolEntry, serverName, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string, taskEvents *TaskEventsBinding) []string {
 	var registeredNames []string
 	var filteredOut []string
 	for _, mcpTool := range entry.tools {
@@ -253,7 +330,9 @@ func (m *Manager) registerPoolBridgeTools(entry *poolEntry, serverName, toolPref
 
 		bt := NewBridgeTool(serverName, mcpTool, &entry.state.clientPtr, toolPrefix, timeoutSec, &entry.state.connected, serverID, m.grantChecker).
 			WithHints(hints.Global, hints.HintFor(mcpTool.Name)).
-			WithForceReconnect(entry.RequestForceReconnect())
+			WithForceReconnect(entry.RequestForceReconnect()).
+			WithTaskStarter(m.starter()).
+			WithTaskEvents(taskEvents)
 
 		if _, exists := m.registry.Get(bt.Name()); exists {
 			slog.Warn("mcp.tool.name_collision",
@@ -319,7 +398,8 @@ func isMethodNotFound(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "method not found")
 }
 
-// healthLoop periodically pings the MCP server and attempts reconnection on failure.
+// healthLoop periodically checks the MCP server (see checkLiveness) and
+// attempts reconnection on failure.
 func (m *Manager) healthLoop(ctx context.Context, ss *serverState) {
 	ticker := newHealthTicker()
 	defer ticker.Stop()
@@ -337,7 +417,7 @@ func (m *Manager) healthLoop(ctx context.Context, ss *serverState) {
 				slog.Debug("mcp.server.health_skip", "server", ss.name, "reason", "reconnect_pending")
 				continue
 			}
-			if err := ss.client.Ping(ctx); err != nil {
+			if err := checkLiveness(ctx, ss.client); err != nil {
 				if isMethodNotFound(err) {
 					ss.connected.Store(true)
 					ss.mu.Lock()
@@ -412,9 +492,10 @@ func reconnectWithBackoff(ctx context.Context, ss *serverState, logPrefix string
 	case <-time.After(backoff):
 	}
 
-	// Fast path: ping existing client — works for transient network blips
-	// where the server-side session is still alive.
-	if err := ss.client.Ping(ctx); err == nil {
+	// Fast path: check the existing client — works for transient network
+	// blips where the server-side session is still alive. checkLiveness
+	// contacts the server in both eras (Ping alone is a no-op on modern).
+	if err := checkLiveness(ctx, ss.client); err == nil {
 		ss.connected.Store(true)
 		ss.mu.Lock()
 		ss.reconnAttempts = 0
@@ -449,6 +530,7 @@ func fullReconnect(ctx context.Context, ss *serverState) bool {
 		slog.Warn("mcp.reconnect_create_failed", "server", ss.name, "error", err)
 		return false
 	}
+	router := attachNotificationRouter(newClient)
 
 	if ss.transport != "stdio" {
 		if err := newClient.Start(ctx); err != nil {
@@ -458,11 +540,8 @@ func fullReconnect(ctx context.Context, ss *serverState) bool {
 		}
 	}
 
-	initReq := mcpgo.InitializeRequest{}
-	initReq.Params.ProtocolVersion = mcpgo.LATEST_PROTOCOL_VERSION
-	initReq.Params.ClientInfo = mcpgo.Implementation{Name: "goclaw", Version: "1.0.0"}
-
-	if _, err := newClient.Initialize(ctx, initReq); err != nil {
+	initRes, err := newClient.Initialize(ctx, newInitializeRequest(ss.transport, ss.conn.protocol, clientInfoName))
+	if err != nil {
 		_ = newClient.Close()
 		slog.Warn("mcp.reconnect_init_failed", "server", ss.name, "error", err)
 		return false
@@ -470,8 +549,10 @@ func fullReconnect(ctx context.Context, ss *serverState) bool {
 
 	// Swap atomically: store new client, then close old.
 	// BridgeTools use clientPtr.Load() so they see the new client immediately.
+	// The era is read again: the server may have moved to or from 2026-07-28.
 	oldClient := ss.client
 	ss.client = newClient
+	ss.session.Store(newConnSession(newClient, initRes, router))
 	ss.clientPtr.Store(newClient)
 	ss.connected.Store(true)
 	ss.mu.Lock()

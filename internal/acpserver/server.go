@@ -1,6 +1,7 @@
 package acpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,9 @@ type ServerConfig struct {
 	WorkspaceRoot string
 	MCPExecRoots  []string
 	Version       string
+	// MaxPromptDuration cancels a prompt that runs longer. Zero selects
+	// MaxPromptDurationDefault.
+	MaxPromptDuration time.Duration
 }
 
 type Server struct {
@@ -36,17 +40,30 @@ type Server struct {
 	mu            sync.Mutex
 	transport     *Transport
 	closed        bool
+	// lifeCtx is the context of the active Run, or nil. Goroutines that
+	// serve the ACP connection outside a prompt (wake subscription and
+	// wake delivery) run on it, and Run waits for them in background.
+	lifeCtx    context.Context
+	background sync.WaitGroup
+	wakeSlots  chan struct{}
 }
 
 func NewServer(config ServerConfig) (*Server, error) {
 	if config.Gateway == nil || config.AgentID == "" || config.WorkspaceRoot == "" {
 		return nil, errors.New("ACP server requires gateway, agent, and workspace root")
 	}
+	if config.MaxPromptDuration != 0 {
+		if err := ValidateMaxPromptDuration(config.MaxPromptDuration); err != nil {
+			return nil, err
+		}
+	}
 	root, err := canonicalDirectory(config.WorkspaceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve ACP workspace root: %w", err)
 	}
-	return &Server{gateway: config.Gateway, agentID: config.AgentID, workspaceRoot: root, version: config.Version, mcpExecRoots: append([]string(nil), config.MCPExecRoots...), sessions: NewSessionRegistry()}, nil
+	server := &Server{gateway: config.Gateway, agentID: config.AgentID, workspaceRoot: root, version: config.Version, mcpExecRoots: append([]string(nil), config.MCPExecRoots...), sessions: NewSessionRegistry(config.MaxPromptDuration), wakeSlots: make(chan struct{}, MaxConcurrentWakes)}
+	config.Gateway.SetWakeHandler(server.handleGatewayWake)
+	return server, nil
 }
 
 func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) error {
@@ -59,8 +76,10 @@ func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) err
 		s.mu.Unlock()
 		return errors.New("ACP server is already running")
 	}
-	transport := NewTransport(input, output, Handler{NewSession: s.handleNewSession, Prompt: s.handlePrompt, Cancel: s.handleCancel}, s.version)
+	transport := NewTransport(input, output, Handler{NewSession: s.handleNewSession, Prompt: s.handlePrompt, Cancel: s.handleCancel, Initialized: s.handleInitialized}, s.version)
 	s.transport = transport
+	lifeCtx, stopLife := context.WithCancel(ctx)
+	s.lifeCtx = lifeCtx
 	s.mu.Unlock()
 	reapCtx, stopReaper := context.WithCancel(ctx)
 	reaperDone := make(chan struct{})
@@ -81,9 +100,12 @@ func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) err
 	stopReaper()
 	<-reaperDone
 	s.sessions.Close()
+	stopLife()
 	s.mu.Lock()
 	s.transport = nil
+	s.lifeCtx = nil
 	s.mu.Unlock()
+	s.background.Wait()
 	return err
 }
 
@@ -105,7 +127,7 @@ func (s *Server) handleNewSession(ctx context.Context, params NewSessionParams) 
 		return NewSessionResult{}, &RPCError{Code: CodeInvalidParams, Message: "Invalid workspace"}
 	}
 	id := uuid.NewString()
-	record := &sessionRecord{ID: id, SessionKey: sessions.BuildWSSessionKey(s.agentID, id), CWD: cwd}
+	record := &sessionRecord{ID: id, SessionKey: sessions.BuildWSSessionKey(s.agentID, id), CWD: cwd, thread: bytes.Clone(params.Thread)}
 	if len(params.MCPServers) > 0 {
 		manager, managerErr := NewSessionMCPManager(s.workspaceRoot, s.mcpExecRoots)
 		if managerErr != nil {
@@ -129,7 +151,7 @@ func (s *Server) handleNewSession(ctx context.Context, params NewSessionParams) 
 }
 
 func (s *Server) handlePrompt(ctx context.Context, params PromptParams) (PromptResult, error) {
-	record, generation, promptCtx, err := s.sessions.BeginPrompt(params.SessionID, ctx)
+	record, generation, promptCtx, err := s.sessions.BeginPrompt(params.SessionID, ctx, params.Thread)
 	if err != nil {
 		return PromptResult{}, err
 	}
@@ -189,7 +211,7 @@ func (s *Server) handlePrompt(ctx context.Context, params PromptParams) (PromptR
 	}
 	responses := make(chan outcome, 1)
 	go func() {
-		response, sendErr := s.gateway.ChatSend(promptCtx, ChatSendRequest{AgentID: s.agentID, SessionKey: record.SessionKey, Message: joinPrompt(params.Prompt), Stream: true, Generation: generation, TerminalMode: "metadata"})
+		response, sendErr := s.gateway.ChatSend(promptCtx, ChatSendRequest{AgentID: s.agentID, SessionKey: record.SessionKey, Message: joinPrompt(params.Prompt), Stream: true, Generation: generation, TerminalMode: "metadata", ACPClient: s.acpClient(params.SessionID, generation)})
 		responses <- outcome{response, sendErr}
 	}()
 	used := 0
@@ -201,6 +223,10 @@ func (s *Server) handlePrompt(ctx context.Context, params PromptParams) (PromptR
 			}
 			if event.Event == protocol.EventACPToolCall && record.mcp != nil {
 				go s.handleMCPToolCall(promptCtx, record, event, capabilityID, generation)
+				continue
+			}
+			if event.Event == protocol.EventACPInputRequest {
+				go s.handleInputRequest(promptCtx, params.SessionID, record, event, generation)
 				continue
 			}
 			if event.Type == protocol.AgentEventRunStarted && event.RunID != "" {
@@ -234,6 +260,26 @@ func (s *Server) handlePrompt(ctx context.Context, params PromptParams) (PromptR
 			return PromptResult{StopReason: "cancelled"}, nil
 		}
 	}
+}
+
+// acpClient returns the acpClient param of chat.send for the active prompt:
+// the client features from initialize, the thread and the ACP session id.
+func (s *Server) acpClient(sessionID string, generation uint64) *ChatACPClient {
+	var caps ClientCapabilities
+	if transport := s.currentTransport(); transport != nil {
+		caps = transport.ClientCapabilities()
+	}
+	client := &ChatACPClient{ElicitationForm: caps.ElicitationForm, Wake: caps.Wake, ACPSessionID: sessionID}
+	if prompt, ok := s.sessions.PromptContext(sessionID, generation); ok {
+		client.Thread = prompt.Thread
+	}
+	return client
+}
+
+// PromptContext returns the ACP session ID and thread context of the active
+// prompt with this generation.
+func (s *Server) PromptContext(sessionID string, generation uint64) (PromptContext, bool) {
+	return s.sessions.PromptContext(sessionID, generation)
 }
 
 func (s *Server) handleMCPToolCall(ctx context.Context, record *sessionRecord, event GatewayEvent, expectedCapabilityID string, expectedGeneration uint64) {

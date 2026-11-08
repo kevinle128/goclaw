@@ -20,6 +20,11 @@ const (
 	EventConnectChallenge  = "connect.challenge"
 	EventTalkMode          = "talk.mode"
 	EventACPToolCall       = "acp.tool.call"
+	// EventACPWake goes to one adapter connection that subscribed for wakes.
+	EventACPWake = "acp.wake"
+	// EventACPInputRequest asks the adapter of a running ACP prompt to show
+	// a form to the people of the turn (ACP elicitation/create).
+	EventACPInputRequest = "acp.input.request"
 
 	// Agent summoning events (predefined agent setup via LLM).
 	EventAgentSummoning = "agent.summoning"

@@ -1,10 +1,16 @@
 package mcp
 
 import (
+	"context"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/nextlevelbuilder/goclaw/internal/mcp/mcptest"
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
 func TestInputSchemaToMap(t *testing.T) {
@@ -309,5 +315,199 @@ func TestEnsureMCPPrefix(t *testing.T) {
 				t.Errorf("ensureMCPPrefix(%q, %q) = %q, want %q", tt.prefix, tt.serverName, got, tt.want)
 			}
 		})
+	}
+}
+
+// bridgeToolFor connects to srv and returns the BridgeTool of toolName.
+func bridgeToolFor(t *testing.T, srv *mcptest.Server, toolName string) (*BridgeTool, *serverState) {
+	t.Helper()
+	ctx := context.Background()
+	ss, mcpTools, err := connectAndDiscover(ctx, "stub", "streamable-http", "", nil, nil, srv.URL, nil, 5, ProtocolAuto)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = ss.client.Close() })
+	for _, mt := range mcpTools {
+		if mt.Name == toolName {
+			return NewBridgeTool("stub", mt, &ss.clientPtr, "", 5, &ss.connected, uuid.Nil, nil), ss
+		}
+	}
+	t.Fatalf("tool %q not listed", toolName)
+	return nil, nil
+}
+
+type recordingTaskStarter struct {
+	got []TaskStart
+}
+
+func (r *recordingTaskStarter) StartTask(_ context.Context, start TaskStart) *tools.Result {
+	r.got = append(r.got, start)
+	return tools.NewResult("watching " + start.Task.TaskID)
+}
+
+func TestModernCallToolCompleteResultUnchanged(t *testing.T) {
+	complete := func(withResultType bool) mcptest.ToolHandler {
+		return func(context.Context, mcptest.ToolCall) mcptest.Reply {
+			res := map[string]any{"content": []any{map[string]any{"type": "text", "text": "hello"}}}
+			if withResultType {
+				res["resultType"] = "complete"
+			}
+			return mcptest.ResultReply(res)
+		}
+	}
+	legacySrv := mcptest.New(t, mcptest.Options{Mode: mcptest.ModeLegacy})
+	legacySrv.AddTool("echo", "Echo", complete(false))
+	legacyTool, _ := bridgeToolFor(t, legacySrv, "echo")
+	want := legacyTool.Execute(context.Background(), nil)
+	if want.IsError || !strings.Contains(want.ForLLM, "hello") {
+		t.Fatalf("legacy result = %+v", want)
+	}
+
+	for _, withRT := range []bool{false, true} {
+		srv := mcptest.New(t, mcptest.Options{Mode: mcptest.ModeModern})
+		srv.AddTool("echo", "Echo", complete(withRT))
+		bt, ss := bridgeToolFor(t, srv, "echo")
+		if ss.era() != EraModern {
+			t.Fatalf("era = %v", ss.era())
+		}
+		got := bt.Execute(context.Background(), map[string]any{"q": "x"})
+		if got.IsError || got.ForLLM != want.ForLLM {
+			t.Errorf("resultType present=%v: modern result %q differs from legacy %q", withRT, got.ForLLM, want.ForLLM)
+		}
+		if len(srv.RequestsFor("tools/call")) != 1 {
+			t.Errorf("tools/call count = %d", len(srv.RequestsFor("tools/call")))
+		}
+	}
+}
+
+func TestModernCallToolErrorFlagUnchanged(t *testing.T) {
+	srv := mcptest.New(t, mcptest.Options{Mode: mcptest.ModeModern})
+	srv.AddTool("fail", "Fail", func(context.Context, mcptest.ToolCall) mcptest.Reply {
+		return mcptest.ResultReply(map[string]any{"isError": true, "content": []any{map[string]any{"type": "text", "text": "boom"}}})
+	})
+	bt, _ := bridgeToolFor(t, srv, "fail")
+	got := bt.Execute(context.Background(), nil)
+	if !got.IsError || got.ForLLM != "boom" {
+		t.Errorf("result = %+v, want error \"boom\"", got)
+	}
+}
+
+func TestModernCallToolTaskResultIsDiscriminated(t *testing.T) {
+	srv := mcptest.New(t, mcptest.Options{Mode: mcptest.ModeModern})
+	srv.AddTaskTool("run_workflow", "Start a run")
+
+	bt, _ := bridgeToolFor(t, srv, "run_workflow")
+	got := bt.Execute(context.Background(), map[string]any{"workflow": "w"})
+	if got.IsError || !strings.Contains(got.ForLLM, "MCP task task-1 started (status working).") {
+		t.Fatalf("nil starter result = %+v", got)
+	}
+	call := srv.RequestsFor("tools/call")[0]
+	if !call.HasExtension(mcptest.ExtensionTasks) || !call.HasExtension(mcptest.ExtensionEvents) {
+		t.Errorf("advertised extensions not declared: %v", call.ClientCapabilities())
+	}
+	if _, ok := call.ClientCapabilities()["elicitation"]; ok {
+		t.Errorf("elicitation declared without a form-capable run: %v", call.ClientCapabilities())
+	}
+
+	starter := &recordingTaskStarter{}
+	bt.WithTaskStarter(starter)
+	got = bt.Execute(WithElicitationForm(context.Background(), true), nil)
+	if got.ForLLM != "watching task-2" || len(starter.got) != 1 {
+		t.Fatalf("starter result = %+v, calls %d", got, len(starter.got))
+	}
+	start := starter.got[0]
+	if start.Task.Status != "working" || start.Task.TTLMs == nil || *start.Task.TTLMs != 2592000000 ||
+		start.Task.PollIntervalMs == nil || *start.Task.PollIntervalMs != 5000 || start.Task.CreatedAt == "" {
+		t.Errorf("CreateTaskResult decoded wrong: %+v", start.Task)
+	}
+	if !start.Capabilities.Tasks || !start.Capabilities.Events || !start.Capabilities.ElicitationForm || start.Capabilities.ID != "" {
+		t.Errorf("capability set = %+v", start.Capabilities)
+	}
+	if start.Client == nil || start.ToolName != "run_workflow" {
+		t.Errorf("task start = %+v", start)
+	}
+	call = srv.RequestsFor("tools/call")[1]
+	elic, _ := call.ClientCapabilities()["elicitation"].(map[string]any)
+	if _, ok := elic["form"]; !ok {
+		t.Errorf("elicitation form not declared for a form-capable run: %v", call.ClientCapabilities())
+	}
+}
+
+func TestModernCallToolDeclaresOnlyAdvertisedExtensions(t *testing.T) {
+	srv := mcptest.New(t, mcptest.Options{Mode: mcptest.ModeModern, Extensions: map[string]any{}})
+	srv.AddTaskTool("run_workflow", "Start a run")
+	bt, _ := bridgeToolFor(t, srv, "run_workflow")
+	got := bt.Execute(context.Background(), nil)
+	if got.IsError || !strings.Contains(got.ForLLM, "run_id: task-1") {
+		t.Fatalf("result = %+v, want the plain result", got)
+	}
+	call := srv.RequestsFor("tools/call")[0]
+	if call.HasExtension(mcptest.ExtensionTasks) || call.HasExtension(mcptest.ExtensionEvents) {
+		t.Errorf("declared extensions the server did not advertise: %v", call.ClientCapabilities())
+	}
+}
+
+func TestModernCallToolUnknownResultTypeIsError(t *testing.T) {
+	srv := mcptest.New(t, mcptest.Options{Mode: mcptest.ModeModern})
+	srv.AddTool("weird", "Weird", func(context.Context, mcptest.ToolCall) mcptest.Reply {
+		return mcptest.ResultReply(map[string]any{"resultType": "banana", "content": []any{}})
+	})
+	srv.AddTool("ask", "Ask", func(context.Context, mcptest.ToolCall) mcptest.Reply {
+		return mcptest.ResultReply(map[string]any{"resultType": "input_required", "requestState": "s"})
+	})
+	weird, _ := bridgeToolFor(t, srv, "weird")
+	if got := weird.Execute(context.Background(), nil); !got.IsError || !strings.Contains(got.ForLLM, "banana") {
+		t.Errorf("unknown resultType result = %+v", got)
+	}
+	ask, _ := bridgeToolFor(t, srv, "ask")
+	if got := ask.Execute(context.Background(), nil); !got.IsError ||
+		!strings.Contains(got.ForLLM, "server asks for input before the task starts; not supported") {
+		t.Errorf("input_required result = %+v", got)
+	}
+}
+
+func TestModern404IsNotSessionReset(t *testing.T) {
+	srv := mcptest.New(t, mcptest.Options{Mode: mcptest.ModeModern})
+	srv.AddTool("echo", "Echo", func(context.Context, mcptest.ToolCall) mcptest.Reply { return mcptest.TextReply("ok") })
+	var calls atomic.Int32
+	srv.Handle("tools/call", func(context.Context, mcptest.Request) mcptest.Reply {
+		if calls.Add(1) == 1 {
+			return mcptest.HTTPReply(404, `{"jsonrpc":"2.0","id":null,"error":{"code":-32601,"message":"Method not found"}}`)
+		}
+		return mcptest.TextReply("ok")
+	})
+	bt, _ := bridgeToolFor(t, srv, "echo")
+	var reconnects atomic.Int32
+	bt.WithForceReconnect(func(string) { reconnects.Add(1) })
+
+	got := bt.Execute(context.Background(), nil)
+	if !got.IsError || strings.Contains(got.ForLLM, "reset its session") {
+		t.Errorf("404 result = %+v, want a plain error", got)
+	}
+	if reconnects.Load() != 0 || !bt.IsConnected() {
+		t.Errorf("a modern 404 started a reconnect (count %d, connected %v)", reconnects.Load(), bt.IsConnected())
+	}
+	if again := bt.Execute(context.Background(), nil); again.IsError || !strings.Contains(again.ForLLM, "ok") {
+		t.Errorf("call after the 404 = %+v", again)
+	}
+}
+
+func TestLegacyHTTPSessionResetStillReconnects(t *testing.T) {
+	srv := mcptest.New(t, mcptest.Options{Mode: mcptest.ModeLegacy})
+	srv.AddTool("echo", "Echo", func(context.Context, mcptest.ToolCall) mcptest.Reply { return mcptest.TextReply("ok") })
+	bt, ss := bridgeToolFor(t, srv, "echo")
+	if ss.era() != EraLegacy {
+		t.Fatalf("era = %v", ss.era())
+	}
+	var reasons []string
+	bt.WithForceReconnect(func(reason string) { reasons = append(reasons, reason) })
+
+	srv.ForgetSessions()
+	got := bt.Execute(context.Background(), nil)
+	if !got.IsError || !strings.Contains(got.ForLLM, "reset its session") {
+		t.Errorf("result = %+v, want the session-reset hint", got)
+	}
+	if len(reasons) != 1 {
+		t.Errorf("force reconnect calls = %v, want 1", reasons)
 	}
 }

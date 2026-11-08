@@ -365,5 +365,12 @@ func init() {
 		MsgPackagesUpdatesReasonLocked:             "Package database is locked",
 		MsgPackagesUpdatesReasonDiskFull:           "Disk full",
 		MsgPackagesUpdatesReasonHelperUnavailable:  "Privileged helper unavailable",
+		// ACP wake delivery and input relay
+		MsgACPRelayUnavailable: "ACP wake and input relay are unavailable",
+		MsgACPInvalidParams:    "invalid %s parameters",
+		MsgACPAgentNotAllowed:  "this connection cannot run agent %s",
+		MsgACPSubscribeLimit:   "too many wake subscriptions on this connection",
+		MsgACPRequestNotFound:  "ACP request not found or already answered",
+		MsgACPRequestNotOwner:  "ACP request belongs to another connection or run",
 	})
 }

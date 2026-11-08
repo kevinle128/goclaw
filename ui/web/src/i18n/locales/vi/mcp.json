@@ -60,7 +60,12 @@
       "nameSlug": "Tên phải là slug hợp lệ (chữ thường, số, dấu gạch ngang)",
       "commandRequired": "Lệnh là bắt buộc cho giao thức stdio",
       "urlRequired": "URL là bắt buộc cho giao thức SSE/HTTP",
-      "connectionFailed": "Kết nối thất bại"
+      "connectionFailed": "Kết nối thất bại",
+      "taskEventsIncomplete": "Sự kiện task cần cả sự kiện và tham số task",
+      "taskEventTooLong": "Sự kiện tối đa {{max}} ký tự",
+      "taskArgumentTooLong": "Tham số task tối đa {{max}} ký tự",
+      "bootstrapInvalid": "Tham số khởi tạo phải là một object JSON",
+      "bootstrapTooLarge": "Tham số khởi tạo tối đa {{max}} byte"
     },
     "requireUserCredentials": "Yêu cầu Credentials riêng",
     "requireUserCredentialsHint": "Mỗi user phải cấu hình credentials riêng. Server bị vô hiệu cho user chưa có credentials.",
@@ -72,7 +77,23 @@
     "toolHintsPerTool": "Gợi ý theo tool cụ thể",
     "toolHintsToolNamePlaceholder": "Tên tool (vd: search)",
     "toolHintsToolValuePlaceholder": "Nội dung gợi ý sẽ gửi cho LLM",
-    "toolHintsAdd": "Thêm gợi ý"
+    "toolHintsAdd": "Thêm gợi ý",
+    "protocol": "Giao thức",
+    "protocolHint": "Tự động dùng MCP 2026-07-28 (tasks và events) khi server hỗ trợ, nếu không thì dùng giao thức cũ. Legacy luôn dùng giao thức cũ. Server stdio và SSE luôn dùng giao thức cũ.",
+    "protocolOptions": {
+      "auto": "Tự động",
+      "legacy": "Legacy"
+    },
+    "taskEvents": "Sự kiện task (Tùy chọn)",
+    "taskEventsHint": "Theo dõi các task mà tool của server này khởi tạo qua một sự kiện của server, thay vì chỉ polling. Để trống tất cả các trường để tắt.",
+    "taskEvent": "Sự kiện",
+    "taskEventPlaceholder": "vd: workflow_run.status_changed",
+    "taskArgument": "Tham số task",
+    "taskArgumentPlaceholder": "vd: run_id",
+    "taskArgumentHint": "Tham số đăng ký sự kiện nhận task id.",
+    "bootstrapArguments": "Tham số khởi tạo (JSON)",
+    "bootstrapArgumentsPlaceholder": "{\"workflow\": \"my-workflow\"}",
+    "bootstrapArgumentsHint": "Object JSON tùy chọn cho lần poll sự kiện đầu tiên, gửi trước khi gọi tool."
   },
   "grants": {
     "title": "Quyền agent - {{name}}",

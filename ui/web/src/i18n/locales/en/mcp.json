@@ -60,7 +60,12 @@
       "nameSlug": "Name must be a valid slug (lowercase letters, numbers, hyphens only)",
       "commandRequired": "Command is required for stdio transport",
       "urlRequired": "URL is required for SSE/HTTP transport",
-      "connectionFailed": "Connection failed"
+      "connectionFailed": "Connection failed",
+      "taskEventsIncomplete": "Task events need both an event and a task argument",
+      "taskEventTooLong": "Event must be at most {{max}} characters",
+      "taskArgumentTooLong": "Task argument must be at most {{max}} characters",
+      "bootstrapInvalid": "Bootstrap arguments must be a JSON object",
+      "bootstrapTooLarge": "Bootstrap arguments must be at most {{max}} bytes"
     },
     "requireUserCredentials": "Require User Credentials",
     "requireUserCredentialsHint": "Each user must configure their own credentials. Server is disabled for users without personal credentials.",
@@ -72,7 +77,23 @@
     "toolHintsPerTool": "Per-tool hints",
     "toolHintsToolNamePlaceholder": "Tool name (e.g. search)",
     "toolHintsToolValuePlaceholder": "Hint text shown to the LLM",
-    "toolHintsAdd": "Add hint"
+    "toolHintsAdd": "Add hint",
+    "protocol": "Protocol",
+    "protocolHint": "Auto uses MCP 2026-07-28 (tasks and events) when the server supports it, else the older protocol. Legacy always uses the older protocol. stdio and SSE servers always use the older protocol.",
+    "protocolOptions": {
+      "auto": "Auto",
+      "legacy": "Legacy"
+    },
+    "taskEvents": "Task events (Optional)",
+    "taskEventsHint": "Follow tasks that this server's tools start through a server event, instead of polling only. Leave all fields empty to turn off.",
+    "taskEvent": "Event",
+    "taskEventPlaceholder": "e.g. workflow_run.status_changed",
+    "taskArgument": "Task argument",
+    "taskArgumentPlaceholder": "e.g. run_id",
+    "taskArgumentHint": "The event subscription argument that takes the task id.",
+    "bootstrapArguments": "Bootstrap arguments (JSON)",
+    "bootstrapArgumentsPlaceholder": "{\"workflow\": \"my-workflow\"}",
+    "bootstrapArgumentsHint": "Optional JSON object for the first event poll, sent before the tool call."
   },
   "grants": {
     "title": "Agent Grants - {{name}}",

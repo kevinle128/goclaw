@@ -461,3 +461,500 @@ func TestTransportCancellationInterruptsIdleInput(t *testing.T) {
 		t.Fatal("Serve() did not stop while stdin was idle")
 	}
 }
+
+type pipeTransport struct {
+	transport *Transport
+	input     *io.PipeWriter
+	output    *lockedBuffer
+	done      chan error
+}
+
+func startPipeTransport(t *testing.T, handler Handler) *pipeTransport {
+	t.Helper()
+	reader, input := io.Pipe()
+	output := &lockedBuffer{}
+	transport := NewTransport(reader, output, handler, "test-version")
+	done := make(chan error, 1)
+	go func() { done <- transport.Serve(context.Background()) }()
+	t.Cleanup(func() { _ = input.Close() })
+	p := &pipeTransport{transport: transport, input: input, output: output, done: done}
+	p.write(t, initializeLine(`1`))
+	waitForLines(t, output, 1)
+	return p
+}
+
+func (p *pipeTransport) write(t *testing.T, line string) {
+	t.Helper()
+	if _, err := io.WriteString(p.input, line); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (p *pipeTransport) closeAndWait(t *testing.T) {
+	t.Helper()
+	if err := p.input.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-p.done:
+		if err != nil {
+			t.Fatalf("Serve() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve() did not stop after input close")
+	}
+}
+
+type outboundFrame struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params"`
+}
+
+func readOutboundFrame(t *testing.T, output *lockedBuffer, index int) outboundFrame {
+	t.Helper()
+	waitForLines(t, output, index+1)
+	var frame outboundFrame
+	if err := json.Unmarshal(splitLines(output.Bytes())[index], &frame); err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	if frame.JSONRPC != "2.0" || json.Unmarshal(frame.ID, &id) != nil || !strings.HasPrefix(id, "goclaw-") || frame.Method == "" {
+		t.Fatalf("outbound frame = %s", splitLines(output.Bytes())[index])
+	}
+	return frame
+}
+
+type requestOutcome struct {
+	result json.RawMessage
+	rpcErr *RPCError
+	err    error
+}
+
+func waitOutcome(t *testing.T, outcomes <-chan requestOutcome) requestOutcome {
+	t.Helper()
+	select {
+	case outcome := <-outcomes:
+		return outcome
+	case <-time.After(2 * time.Second):
+		t.Fatal("Request() did not return")
+		return requestOutcome{}
+	}
+}
+
+func TestTransportRoutesClientResponseToPendingRequest(t *testing.T) {
+	t.Parallel()
+
+	var transport atomic.Pointer[Transport]
+	outcomes := make(chan requestOutcome, 1)
+	handler := Handler{
+		NewSession: func(context.Context, NewSessionParams) (NewSessionResult, error) {
+			return NewSessionResult{SessionID: "session-1"}, nil
+		},
+		Prompt: func(ctx context.Context, _ PromptParams) (PromptResult, error) {
+			result, rpcErr, err := transport.Load().Request(ctx, "_buzz/wake", map[string]string{"wakeId": "w_1"})
+			outcomes <- requestOutcome{result, rpcErr, err}
+			return PromptResult{StopReason: "end_turn"}, nil
+		},
+	}
+	p := startPipeTransport(t, handler)
+	transport.Store(p.transport)
+	p.write(t, `{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}`+"\n")
+	waitForLines(t, p.output, 2)
+	p.write(t, `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"session-1","prompt":[{"type":"text","text":"hello"}]}}`+"\n")
+
+	frame := readOutboundFrame(t, p.output, 2)
+	if frame.Method != "_buzz/wake" || string(frame.Params) != `{"wakeId":"w_1"}` {
+		t.Fatalf("outbound request = %#v", frame)
+	}
+	p.write(t, `{"jsonrpc":"2.0","id":`+string(frame.ID)+`,"result":{"outcome":"accepted"}}`+"\n")
+	outcome := waitOutcome(t, outcomes)
+	if outcome.err != nil || outcome.rpcErr != nil || string(outcome.result) != `{"outcome":"accepted"}` {
+		t.Fatalf("Request() = %s, %v, %v", outcome.result, outcome.rpcErr, outcome.err)
+	}
+	waitForLines(t, p.output, 4)
+	p.closeAndWait(t)
+
+	lines := splitLines(p.output.Bytes())
+	if len(lines) != 4 {
+		t.Fatalf("frame count = %d, want 4 (no error frame for the response): %s", len(lines), bytes.Join(lines, []byte("\n")))
+	}
+	if got := responseID(t, lines[3]); got != "3" {
+		t.Fatalf("prompt response id = %s", got)
+	}
+}
+
+func TestTransportDropsUnknownResponseWithoutErrorFrame(t *testing.T) {
+	t.Parallel()
+
+	p := startPipeTransport(t, Handler{})
+	p.write(t, `{"jsonrpc":"2.0","id":"goclaw-999","result":{}}`+"\n")
+	p.write(t, `{"jsonrpc":"2.0","id":7,"result":null}`+"\n")
+	p.write(t, `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}`+"\n")
+	p.write(t, `{"jsonrpc":"2.0","id":"other","error":{"code":-32601,"message":"Method not found"}}`+"\n")
+	p.closeAndWait(t)
+	if lines := splitLines(p.output.Bytes()); len(lines) != 1 {
+		t.Fatalf("frame count = %d, want only initialize response: %s", len(lines), bytes.Join(lines, []byte("\n")))
+	}
+}
+
+func TestTransportKeepsMalformedResponseBehaviour(t *testing.T) {
+	t.Parallel()
+
+	input := initializeLine(`1`) +
+		`{"jsonrpc":"2.0","id":"goclaw-1","result":{},"error":{"code":1,"message":"x"}}` + "\n" +
+		`{"jsonrpc":"2.0","id":"goclaw-1"}` + "\n" +
+		`{"jsonrpc":"1.0","id":"goclaw-1","result":{}}` + "\n" +
+		`{"jsonrpc":"2.0","id":"goclaw-1","method":"","result":{}}` + "\n"
+	lines, err := serveTranscript(input, Handler{})
+	if err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+	for index := 1; index <= 4; index++ {
+		assertErrorCode(t, lines, index, CodeInvalidRequest)
+	}
+}
+
+func TestTransportRequestReturnsClientError(t *testing.T) {
+	t.Parallel()
+
+	p := startPipeTransport(t, Handler{})
+	outcomes := make(chan requestOutcome, 1)
+	go func() {
+		result, rpcErr, err := p.transport.Request(context.Background(), "_buzz/wake", nil)
+		outcomes <- requestOutcome{result, rpcErr, err}
+	}()
+	frame := readOutboundFrame(t, p.output, 1)
+	if frame.Params != nil {
+		t.Fatalf("nil params were serialized: %s", frame.Params)
+	}
+	p.write(t, `{"jsonrpc":"2.0","id":`+string(frame.ID)+`,"error":{"code":-32601,"message":"Method not found","data":{"x":1}}}`+"\n")
+	outcome := waitOutcome(t, outcomes)
+	if outcome.err != nil || outcome.result != nil || outcome.rpcErr == nil || outcome.rpcErr.Code != CodeMethodNotFound || outcome.rpcErr.Message != "Method not found" {
+		t.Fatalf("Request() = %s, %#v, %v", outcome.result, outcome.rpcErr, outcome.err)
+	}
+	p.closeAndWait(t)
+	if lines := splitLines(p.output.Bytes()); len(lines) != 2 {
+		t.Fatalf("frame count = %d, want 2", len(lines))
+	}
+}
+
+func TestTransportRequestOutsidePrompt(t *testing.T) {
+	t.Parallel()
+
+	p := startPipeTransport(t, Handler{})
+	outcomes := make(chan requestOutcome, 2)
+	for range 2 {
+		go func() {
+			result, rpcErr, err := p.transport.Request(context.Background(), "_buzz/wake", map[string]int{"n": 1})
+			outcomes <- requestOutcome{result, rpcErr, err}
+		}()
+	}
+	first := readOutboundFrame(t, p.output, 1)
+	second := readOutboundFrame(t, p.output, 2)
+	if bytes.Equal(first.ID, second.ID) {
+		t.Fatalf("outbound ids collide: %s", first.ID)
+	}
+	p.write(t, `{"jsonrpc":"2.0","id":`+string(second.ID)+`,"result":{"outcome":"busy"}}`+"\n")
+	p.write(t, `{"jsonrpc":"2.0","id":`+string(first.ID)+`,"result":{"outcome":"duplicate"}}`+"\n")
+	results := map[string]bool{}
+	for range 2 {
+		outcome := waitOutcome(t, outcomes)
+		if outcome.err != nil || outcome.rpcErr != nil {
+			t.Fatalf("Request() error = %v, %v", outcome.rpcErr, outcome.err)
+		}
+		results[string(outcome.result)] = true
+	}
+	if !results[`{"outcome":"busy"}`] || !results[`{"outcome":"duplicate"}`] {
+		t.Fatalf("results = %v", results)
+	}
+	p.closeAndWait(t)
+}
+
+func TestTransportFailsPendingRequestsOnClose(t *testing.T) {
+	t.Parallel()
+
+	p := startPipeTransport(t, Handler{})
+	outcomes := make(chan requestOutcome, 1)
+	go func() {
+		result, rpcErr, err := p.transport.Request(context.Background(), "_buzz/wake", nil)
+		outcomes <- requestOutcome{result, rpcErr, err}
+	}()
+	readOutboundFrame(t, p.output, 1)
+	p.closeAndWait(t)
+	if outcome := waitOutcome(t, outcomes); !errors.Is(outcome.err, ErrTransportClosed) {
+		t.Fatalf("pending Request() error = %v, want ErrTransportClosed", outcome.err)
+	}
+	if _, _, err := p.transport.Request(context.Background(), "_buzz/wake", nil); !errors.Is(err, ErrTransportClosed) {
+		t.Fatalf("Request() after close error = %v, want ErrTransportClosed", err)
+	}
+}
+
+func TestTransportFailsPendingRequestInsidePromptOnClose(t *testing.T) {
+	t.Parallel()
+
+	var transport atomic.Pointer[Transport]
+	outcomes := make(chan requestOutcome, 1)
+	handler := Handler{
+		NewSession: func(context.Context, NewSessionParams) (NewSessionResult, error) {
+			return NewSessionResult{SessionID: "session-1"}, nil
+		},
+		Prompt: func(ctx context.Context, _ PromptParams) (PromptResult, error) {
+			result, rpcErr, err := transport.Load().Request(ctx, "_buzz/wake", nil)
+			outcomes <- requestOutcome{result, rpcErr, err}
+			return PromptResult{StopReason: "end_turn"}, nil
+		},
+	}
+	p := startPipeTransport(t, handler)
+	transport.Store(p.transport)
+	p.write(t, `{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}`+"\n")
+	waitForLines(t, p.output, 2)
+	p.write(t, `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"session-1","prompt":[{"type":"text","text":"hello"}]}}`+"\n")
+	readOutboundFrame(t, p.output, 2)
+	p.closeAndWait(t)
+	if outcome := waitOutcome(t, outcomes); !errors.Is(outcome.err, ErrTransportClosed) {
+		t.Fatalf("pending Request() error = %v, want ErrTransportClosed", outcome.err)
+	}
+}
+
+func TestTransportRequestBeforeServeFails(t *testing.T) {
+	t.Parallel()
+
+	transport := NewTransport(strings.NewReader(""), io.Discard, Handler{}, "test-version")
+	if _, _, err := transport.Request(context.Background(), "_buzz/wake", nil); !errors.Is(err, ErrTransportClosed) {
+		t.Fatalf("Request() error = %v, want ErrTransportClosed", err)
+	}
+	if _, _, err := transport.Request(context.Background(), "", nil); err == nil {
+		t.Fatal("Request() accepted an empty method")
+	}
+}
+
+func TestTransportRequestHonoursContextCancel(t *testing.T) {
+	t.Parallel()
+
+	p := startPipeTransport(t, Handler{})
+	ctx, cancel := context.WithCancel(context.Background())
+	outcomes := make(chan requestOutcome, 1)
+	go func() {
+		result, rpcErr, err := p.transport.Request(ctx, "_buzz/wake", nil)
+		outcomes <- requestOutcome{result, rpcErr, err}
+	}()
+	frame := readOutboundFrame(t, p.output, 1)
+	cancel()
+	if outcome := waitOutcome(t, outcomes); !errors.Is(outcome.err, context.Canceled) {
+		t.Fatalf("Request() error = %v, want context.Canceled", outcome.err)
+	}
+	p.write(t, `{"jsonrpc":"2.0","id":`+string(frame.ID)+`,"result":{"outcome":"accepted"}}`+"\n")
+	p.closeAndWait(t)
+	if lines := splitLines(p.output.Bytes()); len(lines) != 2 {
+		t.Fatalf("frame count = %d, want 2 (late response dropped)", len(lines))
+	}
+}
+
+func TestTransportLimitsPendingOutboundRequests(t *testing.T) {
+	t.Parallel()
+
+	p := startPipeTransport(t, Handler{})
+	ctx, cancel := context.WithCancel(context.Background())
+	outcomes := make(chan requestOutcome, MaxPendingOutboundRequests)
+	for range MaxPendingOutboundRequests {
+		go func() {
+			result, rpcErr, err := p.transport.Request(ctx, MethodElicitationCreate, nil)
+			outcomes <- requestOutcome{result, rpcErr, err}
+		}()
+	}
+	waitForLines(t, p.output, MaxPendingOutboundRequests+1)
+	if _, _, err := p.transport.Request(context.Background(), MethodElicitationCreate, nil); !errors.Is(err, ErrOutboundRequestBackpressure) {
+		t.Fatalf("Request() over limit error = %v, want ErrOutboundRequestBackpressure", err)
+	}
+	cancel()
+	for range MaxPendingOutboundRequests {
+		if outcome := waitOutcome(t, outcomes); !errors.Is(outcome.err, context.Canceled) {
+			t.Fatalf("Request() error = %v, want context.Canceled", outcome.err)
+		}
+	}
+	freed := make(chan requestOutcome, 1)
+	go func() {
+		result, rpcErr, err := p.transport.Request(context.Background(), MethodElicitationCreate, nil)
+		freed <- requestOutcome{result, rpcErr, err}
+	}()
+	frame := readOutboundFrame(t, p.output, MaxPendingOutboundRequests+1)
+	p.write(t, `{"jsonrpc":"2.0","id":`+string(frame.ID)+`,"result":{}}`+"\n")
+	if outcome := waitOutcome(t, freed); outcome.err != nil {
+		t.Fatalf("Request() after release error = %v", outcome.err)
+	}
+	p.closeAndWait(t)
+}
+
+// Open questions must not block wakes: _buzz/wake requests have their own
+// limit.
+func TestTransportLimitsPendingWakesSeparately(t *testing.T) {
+	t.Parallel()
+
+	p := startPipeTransport(t, Handler{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	total := MaxPendingOutboundRequests + MaxPendingOutboundWakes
+	outcomes := make(chan requestOutcome, total)
+	for range MaxPendingOutboundRequests {
+		go func() {
+			result, rpcErr, err := p.transport.Request(ctx, MethodElicitationCreate, nil)
+			outcomes <- requestOutcome{result, rpcErr, err}
+		}()
+	}
+	waitForLines(t, p.output, MaxPendingOutboundRequests+1)
+	for range MaxPendingOutboundWakes {
+		go func() {
+			result, rpcErr, err := p.transport.Request(ctx, MethodBuzzWake, nil)
+			outcomes <- requestOutcome{result, rpcErr, err}
+		}()
+	}
+	waitForLines(t, p.output, total+1)
+	if _, _, err := p.transport.Request(context.Background(), MethodBuzzWake, nil); !errors.Is(err, ErrOutboundRequestBackpressure) {
+		t.Fatalf("wake over limit error = %v, want ErrOutboundRequestBackpressure", err)
+	}
+	if _, _, err := p.transport.Request(context.Background(), MethodElicitationCreate, nil); !errors.Is(err, ErrOutboundRequestBackpressure) {
+		t.Fatalf("elicitation over limit error = %v, want ErrOutboundRequestBackpressure", err)
+	}
+	wakes := 0
+	for i := 1; i <= total; i++ {
+		if readOutboundFrame(t, p.output, i).Method == MethodBuzzWake {
+			wakes++
+		}
+	}
+	if wakes != MaxPendingOutboundWakes {
+		t.Fatalf("wake frames = %d, want %d", wakes, MaxPendingOutboundWakes)
+	}
+	cancel()
+	for range total {
+		waitOutcome(t, outcomes)
+	}
+	p.closeAndWait(t)
+}
+
+func initializeWithCapabilities(id, capabilities string) string {
+	return `{"jsonrpc":"2.0","id":` + id + `,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":` + capabilities + `,"clientInfo":{"name":"test","version":"1"}}}` + "\n"
+}
+
+func initializeCapabilities(t *testing.T, capabilities string) (ClientCapabilities, []byte) {
+	t.Helper()
+	var output bytes.Buffer
+	line := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"test","version":"1"}}}` + "\n"
+	if capabilities != "" {
+		line = initializeWithCapabilities(`1`, capabilities)
+	}
+	transport := NewTransport(strings.NewReader(line), &output, Handler{}, "test-version")
+	if err := transport.Serve(context.Background()); err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+	lines := splitLines(output.Bytes())
+	if len(lines) != 1 {
+		t.Fatalf("response count = %d, want 1", len(lines))
+	}
+	var envelope struct {
+		Result json.RawMessage `json:"result"`
+		Error  *RPCError       `json:"error"`
+	}
+	if err := json.Unmarshal(lines[0], &envelope); err != nil || envelope.Error != nil || envelope.Result == nil {
+		t.Fatalf("initialize response = %s", lines[0])
+	}
+	return transport.ClientCapabilities(), lines[0]
+}
+
+func TestInitializeCapturesElicitationFormOnlyWhenExplicit(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		capabilities string
+		want         ClientCapabilities
+	}{
+		"absent":                {"", ClientCapabilities{}},
+		"empty":                 {`{}`, ClientCapabilities{}},
+		"empty elicitation":     {`{"elicitation":{}}`, ClientCapabilities{}},
+		"null form":             {`{"elicitation":{"form":null}}`, ClientCapabilities{}},
+		"empty form":            {`{"elicitation":{"form":{}}}`, ClientCapabilities{ElicitationForm: true}},
+		"form and url":          {`{"elicitation":{"form":{},"url":{}}}`, ClientCapabilities{ElicitationForm: true, ElicitationURL: true}},
+		"null url":              {`{"elicitation":{"url":null}}`, ClientCapabilities{}},
+		"non-object":            {`"text"`, ClientCapabilities{}},
+		"bad elicitation shape": {`{"elicitation":true,"_meta":{"buzz.wake":{"version":1}}}`, ClientCapabilities{Wake: true}},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, _ := initializeCapabilities(t, test.capabilities)
+			if got != test.want {
+				t.Fatalf("ClientCapabilities() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestInitializeCapturesWakeCapabilityAndAdvertisesOwn(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		capabilities string
+		want         bool
+	}{
+		"version one":         {`{"_meta":{"buzz.wake":{"version":1}}}`, true},
+		"version one, extra":  {`{"_meta":{"buzz.wake":{"version":1,"note":"x"}},"elicitation":{}}`, true},
+		"version two":         {`{"_meta":{"buzz.wake":{"version":2}}}`, false},
+		"string version":      {`{"_meta":{"buzz.wake":{"version":"1"}}}`, false},
+		"missing version":     {`{"_meta":{"buzz.wake":{}}}`, false},
+		"boolean":             {`{"_meta":{"buzz.wake":true}}`, false},
+		"null":                {`{"_meta":{"buzz.wake":null}}`, false},
+		"array":               {`{"_meta":{"buzz.wake":[{"version":1}]}}`, false},
+		"other key":           {`{"_meta":{"buzz.other":{"version":1}}}`, false},
+		"top level, not meta": {`{"buzz.wake":{"version":1}}`, false},
+		"meta not an object":  {`{"_meta":"buzz.wake"}`, false},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, line := initializeCapabilities(t, test.capabilities)
+			if got.Wake != test.want {
+				t.Fatalf("Wake = %v, want %v", got.Wake, test.want)
+			}
+			var response struct {
+				Result struct {
+					AgentCapabilities struct {
+						Meta map[string]json.RawMessage `json:"_meta"`
+					} `json:"agentCapabilities"`
+				} `json:"result"`
+			}
+			if err := json.Unmarshal(line, &response); err != nil {
+				t.Fatal(err)
+			}
+			if string(response.Result.AgentCapabilities.Meta["buzz.wake"]) != `{"version":1}` {
+				t.Fatalf("advertised agent capabilities = %s", line)
+			}
+		})
+	}
+}
+
+func TestTransportPassesThreadContextToHandlers(t *testing.T) {
+	t.Parallel()
+
+	var sessionThread, promptThread atomic.Value
+	handler := Handler{
+		NewSession: func(_ context.Context, params NewSessionParams) (NewSessionResult, error) {
+			sessionThread.Store(string(params.Thread))
+			return NewSessionResult{SessionID: "session-1"}, nil
+		},
+		Prompt: func(_ context.Context, params PromptParams) (PromptResult, error) {
+			promptThread.Store(string(params.Thread))
+			return PromptResult{StopReason: "end_turn"}, nil
+		},
+	}
+	p := startPipeTransport(t, handler)
+	p.write(t, `{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[],"_meta":{"buzz.thread":{"channelId":"c1"}}}}`+"\n")
+	waitForLines(t, p.output, 2)
+	p.write(t, `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"session-1","prompt":[{"type":"text","text":"hi"}],"_meta":{"buzz.thread":{"channelId":"c2"}}}}`+"\n")
+	waitForLines(t, p.output, 3)
+	p.write(t, `{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"session-1","prompt":[{"type":"text","text":"hi"}],"_meta":{"buzz.thread":"bad"}}}`+"\n")
+	waitForLines(t, p.output, 4)
+	p.closeAndWait(t)
+	if sessionThread.Load() != `{"channelId":"c1"}` || promptThread.Load() != `{"channelId":"c2"}` {
+		t.Fatalf("handler threads = %v, %v", sessionThread.Load(), promptThread.Load())
+	}
+	assertErrorCode(t, splitLines(p.output.Bytes()), 3, CodeInvalidParams)
+}

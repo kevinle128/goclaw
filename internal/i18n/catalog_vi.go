@@ -365,5 +365,12 @@ func init() {
 		MsgPackagesUpdatesReasonLocked:             "Cơ sở dữ liệu gói đang bị khóa",
 		MsgPackagesUpdatesReasonDiskFull:           "Đĩa đã đầy",
 		MsgPackagesUpdatesReasonHelperUnavailable:  "Dịch vụ đặc quyền không khả dụng",
+		// ACP wake delivery and input relay
+		MsgACPRelayUnavailable: "Chức năng đánh thức và chuyển tiếp nhập liệu ACP không khả dụng",
+		MsgACPInvalidParams:    "tham số %s không hợp lệ",
+		MsgACPAgentNotAllowed:  "kết nối này không được chạy agent %s",
+		MsgACPSubscribeLimit:   "kết nối này có quá nhiều đăng ký đánh thức",
+		MsgACPRequestNotFound:  "không tìm thấy yêu cầu ACP hoặc yêu cầu đã được trả lời",
+		MsgACPRequestNotOwner:  "yêu cầu ACP thuộc về kết nối hoặc lượt chạy khác",
 	})
 }

@@ -374,4 +374,12 @@ const (
 	MsgGitCredHostScopeInvalid         = "error.git_cred_host_scope_invalid"         // "host_scope %q is not a valid hostname"
 	MsgGitCredBlobMissingField         = "error.git_cred_blob_missing_field"         // "blob missing required field %q"
 	MsgGitCredUnsupportedCredType      = "error.git_cred_unsupported_cred_type"      // "credential_type %q is not supported"
+
+	// --- ACP wake delivery and input relay ---
+	MsgACPRelayUnavailable = "error.acp_relay_unavailable" // "ACP wake and input relay are unavailable"
+	MsgACPInvalidParams    = "error.acp_invalid_params"    // "invalid %s parameters"
+	MsgACPAgentNotAllowed  = "error.acp_agent_not_allowed" // "this connection cannot run agent %s"
+	MsgACPSubscribeLimit   = "error.acp_subscribe_limit"   // "too many wake subscriptions on this connection"
+	MsgACPRequestNotFound  = "error.acp_request_not_found" // "ACP request not found or already answered"
+	MsgACPRequestNotOwner  = "error.acp_request_not_owner" // "ACP request belongs to another connection or run"
 )

@@ -60,7 +60,12 @@
       "nameSlug": "名称必须是有效的 slug（小写字母、数字、连字符）",
       "commandRequired": "stdio 传输协议需要提供命令",
       "urlRequired": "SSE/HTTP 传输协议需要提供 URL",
-      "connectionFailed": "连接失败"
+      "connectionFailed": "连接失败",
+      "taskEventsIncomplete": "任务事件需要同时填写事件和任务参数",
+      "taskEventTooLong": "事件最多 {{max}} 个字符",
+      "taskArgumentTooLong": "任务参数最多 {{max}} 个字符",
+      "bootstrapInvalid": "初始参数必须是 JSON 对象",
+      "bootstrapTooLarge": "初始参数最多 {{max}} 字节"
     },
     "requireUserCredentials": "要求用户凭据",
     "requireUserCredentialsHint": "每个用户必须配置自己的凭据。未设置凭据的用户将无法使用此服务器。",
@@ -72,7 +77,23 @@
     "toolHintsPerTool": "针对单个工具的提示",
     "toolHintsToolNamePlaceholder": "工具名称（例如 search）",
     "toolHintsToolValuePlaceholder": "发送给 LLM 的提示内容",
-    "toolHintsAdd": "添加提示"
+    "toolHintsAdd": "添加提示",
+    "protocol": "协议",
+    "protocolHint": "自动：服务器支持时使用 MCP 2026-07-28（tasks 和 events），否则使用旧协议。Legacy：始终使用旧协议。stdio 和 SSE 服务器始终使用旧协议。",
+    "protocolOptions": {
+      "auto": "自动",
+      "legacy": "Legacy"
+    },
+    "taskEvents": "任务事件（可选）",
+    "taskEventsHint": "通过服务器事件跟踪此服务器工具启动的任务，而不只是轮询。所有字段留空即关闭。",
+    "taskEvent": "事件",
+    "taskEventPlaceholder": "例如 workflow_run.status_changed",
+    "taskArgument": "任务参数",
+    "taskArgumentPlaceholder": "例如 run_id",
+    "taskArgumentHint": "接收任务 ID 的事件订阅参数。",
+    "bootstrapArguments": "初始参数（JSON）",
+    "bootstrapArgumentsPlaceholder": "{\"workflow\": \"my-workflow\"}",
+    "bootstrapArgumentsHint": "可选的 JSON 对象，用于首次事件轮询，在调用工具之前发送。"
   },
   "grants": {
     "title": "Agent授权 - {{name}}",

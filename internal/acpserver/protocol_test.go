@@ -21,6 +21,9 @@ func TestProtocolLimits(t *testing.T) {
 		"tools":            MaxTools,
 		"MCP entries":      MaxMCPEntries,
 		"Gateway request":  MaxGatewayFrameBytes,
+		"outbound pending": MaxPendingOutboundRequests,
+		"outbound wakes":   MaxPendingOutboundWakes,
+		"thread context":   MaxThreadContextBytes,
 	}
 	want := map[string]int{
 		"input line":       1 << 20,
@@ -34,6 +37,9 @@ func TestProtocolLimits(t *testing.T) {
 		"tools":            256,
 		"MCP entries":      128,
 		"Gateway request":  480 << 10,
+		"outbound pending": 8,
+		"outbound wakes":   4,
+		"thread context":   4 << 10,
 	}
 	for name, got := range checks {
 		if got != want[name] {
@@ -149,4 +155,84 @@ func rpcErrString(err *RPCError) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func TestThreadContextDecodedFromSessionNewAndPrompt(t *testing.T) {
+	t.Parallel()
+
+	newSession, rpcErr := DecodeNewSessionParams(json.RawMessage(`{"cwd":"/tmp","mcpServers":[],"_meta":{"trace":"x","buzz.thread":{ "channelId" : "c1", "rootEventId":"e1" }}}`))
+	if rpcErr != nil {
+		t.Fatalf("DecodeNewSessionParams() error = %v", rpcErr)
+	}
+	if string(newSession.Thread) != `{"channelId":"c1","rootEventId":"e1"}` {
+		t.Fatalf("session thread = %s", newSession.Thread)
+	}
+	prompt, rpcErr := DecodePromptParams(json.RawMessage(`{"sessionId":"s","prompt":[{"type":"text","text":"hi"}],"_meta":{"buzz.thread":{"channelId":"c2","nested":{"a":[1,2]}}}}`))
+	if rpcErr != nil {
+		t.Fatalf("DecodePromptParams() error = %v", rpcErr)
+	}
+	if string(prompt.Thread) != `{"channelId":"c2","nested":{"a":[1,2]}}` {
+		t.Fatalf("prompt thread = %s", prompt.Thread)
+	}
+
+	for _, raw := range []string{
+		`{"sessionId":"s","prompt":[{"type":"text","text":"hi"}]}`,
+		`{"sessionId":"s","prompt":[{"type":"text","text":"hi"}],"_meta":null}`,
+		`{"sessionId":"s","prompt":[{"type":"text","text":"hi"}],"_meta":"ignored"}`,
+		`{"sessionId":"s","prompt":[{"type":"text","text":"hi"}],"_meta":{"other":{"channelId":"c"}}}`,
+	} {
+		got, rpcErr := DecodePromptParams(json.RawMessage(raw))
+		if rpcErr != nil || got.Thread != nil {
+			t.Errorf("DecodePromptParams(%s) = %s, %v; want no thread and no error", raw, got.Thread, rpcErr)
+		}
+	}
+
+	empty, rpcErr := DecodePromptParams(json.RawMessage(`{"sessionId":"s","prompt":[{"type":"text","text":"hi"}],"_meta":{"buzz.thread":{}}}`))
+	if rpcErr != nil || string(empty.Thread) != `{}` {
+		t.Fatalf("empty thread = %s, %v", empty.Thread, rpcErr)
+	}
+}
+
+func TestThreadContextNotSentInGatewayPromptBudget(t *testing.T) {
+	t.Parallel()
+
+	data, err := json.Marshal(PromptParams{SessionID: "s", Prompt: []TextContent{{Type: "text", Text: "hi"}}, Thread: json.RawMessage(`{"channelId":"c"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "channelId") {
+		t.Fatalf("thread serialized with prompt params: %s", data)
+	}
+}
+
+func TestThreadContextTooLargeIsInvalidParams(t *testing.T) {
+	t.Parallel()
+
+	thread := func(size int) string {
+		// {"v":"..."} has 8 bytes of structure around the value.
+		return `{"v":"` + strings.Repeat("a", size-8) + `"}`
+	}
+	atLimit := thread(MaxThreadContextBytes)
+	overLimit := thread(MaxThreadContextBytes + 1)
+	if len(atLimit) != MaxThreadContextBytes || len(overLimit) != MaxThreadContextBytes+1 {
+		t.Fatalf("fixture sizes = %d, %d", len(atLimit), len(overLimit))
+	}
+
+	if got, rpcErr := DecodePromptParams(json.RawMessage(`{"sessionId":"s","prompt":[{"type":"text","text":"hi"}],"_meta":{"buzz.thread":` + atLimit + `}}`)); rpcErr != nil || len(got.Thread) != MaxThreadContextBytes {
+		t.Fatalf("thread at limit = %d bytes, %v", len(got.Thread), rpcErr)
+	}
+	padded := `{ "v" : "` + strings.Repeat("a", MaxThreadContextBytes-8) + `" }`
+	if _, rpcErr := DecodePromptParams(json.RawMessage(`{"sessionId":"s","prompt":[{"type":"text","text":"hi"}],"_meta":{"buzz.thread":` + padded + `}}`)); rpcErr != nil {
+		t.Fatalf("insignificant whitespace counted toward the limit: %v", rpcErr)
+	}
+
+	invalid := []string{overLimit, `null`, `"text"`, `[]`, `1`, `true`}
+	for _, value := range invalid {
+		if _, rpcErr := DecodePromptParams(json.RawMessage(`{"sessionId":"s","prompt":[{"type":"text","text":"hi"}],"_meta":{"buzz.thread":` + value + `}}`)); rpcErr == nil || rpcErr.Code != CodeInvalidParams {
+			t.Errorf("prompt thread %.20s error = %#v, want invalid params", value, rpcErr)
+		}
+		if _, rpcErr := DecodeNewSessionParams(json.RawMessage(`{"cwd":"/tmp","mcpServers":[],"_meta":{"buzz.thread":` + value + `}}`)); rpcErr == nil || rpcErr.Code != CodeInvalidParams {
+			t.Errorf("session thread %.20s error = %#v, want invalid params", value, rpcErr)
+		}
+	}
 }

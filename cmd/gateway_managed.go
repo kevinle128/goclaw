@@ -146,6 +146,21 @@ func wireExtras(
 	if stores.MCP != nil {
 		mcpPool = mcpbridge.NewPool(mcpbridge.DefaultPoolConfig())
 		mcpGrantChecker = mcpbridge.NewStoreGrantChecker(stores.MCP, msgBus)
+		// Task watchers for MCP tasks that modern tools/call requests
+		// start. The pool carries the manager to the MCP managers and the
+		// per-user MCP tools; runGateway starts and stops it.
+		if stores.MCPTasks != nil {
+			taskWatch, err := mcpbridge.NewTaskWatchManager(mcpbridge.TaskWatchConfig{
+				Tasks:   stores.MCPTasks,
+				Servers: stores.MCP,
+				Pool:    mcpPool,
+			})
+			if err != nil {
+				slog.Warn("mcp.task.watch_disabled", "error", err)
+			} else {
+				mcpPool.SetTaskWatch(taskWatch)
+			}
+		}
 	}
 
 	// 6. Set up agent resolver: lazy-creates Loops from DB
