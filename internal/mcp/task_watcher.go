@@ -606,9 +606,7 @@ func (w *taskWatcher) wake(reason, discriminator string) bool {
 	}
 	if created {
 		w.log().Info("mcp.task.wake_created", "wake_id", wk.WakeID, "reason", reason)
-		if w.mgr.onWake != nil {
-			w.mgr.onWake(w.baseCtx, wk)
-		}
+		w.mgr.notifyWake(w.baseCtx, wk)
 	}
 	return true
 }

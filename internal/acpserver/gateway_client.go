@@ -55,6 +55,38 @@ type ChatSendRequest struct {
 	Stream       bool   `json:"stream"`
 	Generation   uint64 `json:"acpGeneration"`
 	TerminalMode string `json:"terminalMode"`
+	// ACPClient describes the ACP client of the prompt. An older Gateway
+	// ignores it.
+	ACPClient *ChatACPClient `json:"acpClient,omitempty"`
+}
+
+// ChatACPClient is the acpClient param of chat.send: the client features
+// from initialize and the context of the turn.
+type ChatACPClient struct {
+	ElicitationForm bool `json:"elicitationForm"`
+	Wake            bool `json:"wake"`
+	// Thread is the compact _meta["buzz.thread"] object of the turn, or nil.
+	Thread       json.RawMessage `json:"thread,omitempty"`
+	ACPSessionID string          `json:"acpSessionId"`
+}
+
+// GatewayWake is one acp.wake event: the wake id and the ACP params of the
+// _buzz/wake request, unchanged.
+type GatewayWake struct {
+	WakeID string
+	Params json.RawMessage
+}
+
+// GatewayResponseError is an error response of the Gateway to a request.
+type GatewayResponseError struct {
+	Code string
+}
+
+func (e *GatewayResponseError) Error() string {
+	if e.Code == "" {
+		return "gateway request failed"
+	}
+	return "gateway request failed: " + e.Code
 }
 
 type ChatSendResponse struct {
@@ -146,6 +178,11 @@ type GatewayClient struct {
 
 	identityMu sync.RWMutex
 	identity   GatewayIdentity
+
+	// wakeHandler receives acp.wake events. It runs on the read loop and
+	// must not block.
+	wakeMu      sync.RWMutex
+	wakeHandler func(GatewayWake)
 
 	stopped  chan struct{}
 	stopOnce sync.Once
@@ -315,6 +352,25 @@ func (c *GatewayClient) dial(ctx context.Context) (*gatewayConn, error) {
 	go c.readLoop(gc)
 	go c.pingLoop(gc)
 	return gc, nil
+}
+
+// SetWakeHandler sets the receiver of acp.wake events. The events are not
+// keyed by session; they reach the handler on any live connection.
+func (c *GatewayClient) SetWakeHandler(handler func(GatewayWake)) {
+	c.wakeMu.Lock()
+	c.wakeHandler = handler
+	c.wakeMu.Unlock()
+}
+
+// connDone returns a channel that closes when the live connection drops. With
+// no live connection the channel is already closed.
+func (c *GatewayClient) connDone() <-chan struct{} {
+	if gc := c.liveConn(); gc != nil {
+		return gc.done
+	}
+	closed := make(chan struct{})
+	close(closed)
+	return closed
 }
 
 // Identity returns the identity established by Connect.
@@ -511,9 +567,9 @@ func (c *GatewayClient) dispatchResponse(gc *gatewayConn, data []byte) {
 
 func gatewayResponseError(shape *protocol.ErrorShape) error {
 	if shape == nil {
-		return errors.New("gateway request failed")
+		return &GatewayResponseError{}
 	}
-	return fmt.Errorf("gateway request failed: %s", shape.Code)
+	return &GatewayResponseError{Code: shape.Code}
 }
 
 func (c *GatewayClient) dispatchEvent(data []byte) {
@@ -522,6 +578,10 @@ func (c *GatewayClient) dispatchEvent(data []byte) {
 		Payload json.RawMessage `json:"payload"`
 	}
 	if json.Unmarshal(data, &frame) != nil {
+		return
+	}
+	if frame.Event == protocol.EventACPWake {
+		c.dispatchWake(frame.Payload)
 		return
 	}
 	var route struct {
@@ -556,6 +616,24 @@ func (c *GatewayClient) dispatchEvent(data []byte) {
 	default:
 		c.removeSubscription(sub)
 		sub.fail(ErrGatewayEventOverflow)
+	}
+}
+
+// dispatchWake gives one acp.wake event to the wake handler. An event
+// without a wake id or params object is dropped.
+func (c *GatewayClient) dispatchWake(payload json.RawMessage) {
+	var wake struct {
+		WakeID string          `json:"wakeId"`
+		Params json.RawMessage `json:"params"`
+	}
+	if json.Unmarshal(payload, &wake) != nil || wake.WakeID == "" || len(wake.Params) == 0 {
+		return
+	}
+	c.wakeMu.RLock()
+	handler := c.wakeHandler
+	c.wakeMu.RUnlock()
+	if handler != nil {
+		handler(GatewayWake{WakeID: wake.WakeID, Params: wake.Params})
 	}
 }
 
@@ -675,8 +753,9 @@ func (s *GatewaySubscription) accept(event GatewayEvent) bool {
 		s.runID = event.RunID
 		return true
 	}
-	// MCP calls are routed by session and generation, then checked against the capability.
-	if event.Event == protocol.EventACPToolCall {
+	// MCP calls and input requests are routed by session and generation and
+	// carry no run id; their handlers check the payload.
+	if event.Event == protocol.EventACPToolCall || event.Event == protocol.EventACPInputRequest {
 		return true
 	}
 	return s.runID == "" || (event.RunID != "" && event.RunID == s.runID)

@@ -51,7 +51,32 @@ const (
 	MethodACPToolsRegister = "acp.tools.register"
 	MethodACPToolsResult   = "acp.tools.result"
 	MethodACPToolsRelease  = "acp.tools.release"
+
+	// ACP wake delivery and in-turn input relay (adapter → gateway).
+	MethodACPWakeSubscribe = "acp.wake.subscribe"
+	MethodACPWakeAck       = "acp.wake.ack"
+	MethodACPInputRespond  = "acp.input.respond"
 )
+
+// Outcomes of one acp.wake delivery, sent by the adapter in acp.wake.ack.
+// accepted, duplicate and busy are the result of the ACP client; unsupported
+// means the client answered -32601; failed is any other error or a timeout.
+const (
+	ACPWakeOutcomeAccepted    = "accepted"
+	ACPWakeOutcomeDuplicate   = "duplicate"
+	ACPWakeOutcomeBusy        = "busy"
+	ACPWakeOutcomeUnsupported = "unsupported"
+	ACPWakeOutcomeFailed      = "failed"
+)
+
+// IsACPWakeOutcome reports whether s is one of the acp.wake.ack outcomes.
+func IsACPWakeOutcome(s string) bool {
+	switch s {
+	case ACPWakeOutcomeAccepted, ACPWakeOutcomeDuplicate, ACPWakeOutcomeBusy, ACPWakeOutcomeUnsupported, ACPWakeOutcomeFailed:
+		return true
+	}
+	return false
+}
 
 // Phase 2 - NEEDED methods
 const (

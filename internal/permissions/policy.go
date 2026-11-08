@@ -330,6 +330,9 @@ func isWriteMethod(method string) bool {
 		protocol.MethodACPToolsRegister,
 		protocol.MethodACPToolsResult,
 		protocol.MethodACPToolsRelease,
+		protocol.MethodACPWakeSubscribe,
+		protocol.MethodACPWakeAck,
+		protocol.MethodACPInputRespond,
 
 		// TTS synthesis — invokes provider API (quota/credentials).
 		protocol.MethodTTSConvert,

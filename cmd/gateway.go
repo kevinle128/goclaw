@@ -361,6 +361,9 @@ func runGateway() {
 	if mcpPool != nil {
 		defer mcpPool.Stop()
 	}
+	// ACP wake delivery and input relay. The wake dispatcher is wired to the
+	// task watchers before they resume, so no new wake row is missed.
+	acpRelay := newACPRelay(mcpPool.TaskWatch(), pgStores.MCP)
 	// Resume the watchers of open MCP tasks. Deferred after the pool stop,
 	// so the watchers end before the pool closes its connections.
 	if taskWatch := mcpPool.TaskWatch(); taskWatch != nil {
@@ -369,6 +372,8 @@ func runGateway() {
 		}
 		defer taskWatch.Stop()
 	}
+	acpRelay.start()
+	defer acpRelay.stop()
 
 	// Populate shared deps struct used by extracted helper methods.
 	deps := &gatewayDeps{
@@ -456,6 +461,7 @@ func runGateway() {
 	server.SetLogTee(logTee)
 	server.SetRuntimeLogsHandler(httpapi.NewRuntimeLogsHandler(logTee))
 	pairingMethods, heartbeatMethods, chatMethods, cfgPermsMethods := registerAllMethods(server, agentRouter, pgStores.Sessions, pgStores.RunTimeline, pgStores.Cron, pgStores.Pairing, cfg, cfgPath, workspace, dataDir, msgBus, execApprovalMgr, pgStores.Agents, pgStores.Skills, pgStores.ConfigSecrets, pgStores.Teams, contextFileInterceptor, logTee, pgStores.Heartbeats, pgStores.ConfigPermissions, pgStores.SystemConfigs, pgStores.Tenants, pgStores.SkillTenantCfgs, audioMgr, usageCapSvc)
+	acpRelay.register(server, agentRouter, chatMethods)
 
 	// Phase 3: Agent hooks RPC methods (hooks.list/create/update/delete/toggle/test/history).
 	if hs, ok := pgStores.Hooks.(hooks.HookStore); ok && hs != nil {

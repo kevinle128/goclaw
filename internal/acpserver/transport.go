@@ -29,6 +29,9 @@ type Handler struct {
 	NewSession func(context.Context, NewSessionParams) (NewSessionResult, error)
 	Prompt     func(context.Context, PromptParams) (PromptResult, error)
 	Cancel     func(context.Context, CancelParams)
+	// Initialized runs once after the initialize result is queued, with the
+	// client capabilities. It runs on the read loop and must not block.
+	Initialized func(context.Context, ClientCapabilities)
 }
 
 type Transport struct {
@@ -456,10 +459,11 @@ func (t *Transport) initialize(ctx context.Context, id, raw json.RawMessage) err
 		return t.sendError(ctx, id, &RPCError{Code: CodeInvalidRequest, Message: "Connection already initialized"})
 	}
 	t.state.initialized = true
-	t.state.clientCapabilities = ParseClientCapabilities(params.ClientCapabilities)
+	caps := ParseClientCapabilities(params.ClientCapabilities)
+	t.state.clientCapabilities = caps
 	t.stateMu.Unlock()
 
-	return t.sendResult(ctx, id, InitializeResult{
+	err := t.sendResult(ctx, id, InitializeResult{
 		ProtocolVersion: ProtocolVersion,
 		AgentCapabilities: AgentCapabilities{
 			LoadSession:        false,
@@ -470,6 +474,10 @@ func (t *Transport) initialize(ctx context.Context, id, raw json.RawMessage) err
 		AgentInfo:   AgentInfo{Name: "goclaw", Title: "GoClaw", Version: t.agentVersion},
 		AuthMethods: []any{},
 	})
+	if err == nil && t.handler.Initialized != nil {
+		t.handler.Initialized(ctx, caps)
+	}
+	return err
 }
 
 func (t *Transport) startRequest(ctx context.Context, id json.RawMessage, fn func(context.Context) (any, error)) error {

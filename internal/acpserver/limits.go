@@ -24,7 +24,11 @@ const (
 	MaxTools                = 256
 	MaxMCPEntries           = 128
 
-	MaxGatewayFrameBytes      = acpbridge.MaxGatewayFrameBytes
+	MaxGatewayFrameBytes = acpbridge.MaxGatewayFrameBytes
+	// ChatSendFrameOverhead is the room in a chat.send frame for the fields
+	// other than the prompt text and the thread: frame envelope, agent id,
+	// session key, generation, terminal mode and the acpClient flags.
+	ChatSendFrameOverhead     = 1 << 10
 	MaxPendingGatewayRequests = 256
 	MaxGatewayEventQueue      = 128
 )

@@ -23,6 +23,8 @@ type memTaskStore struct {
 	rows    map[uuid.UUID]*store.MCPTask
 	wakes   map[string]*store.MCPTaskWake
 	cursors []string // every stored cursor, in order
+	// clock, when set, gives delivered_at (default time.Now).
+	clock func() time.Time
 }
 
 func newMemTaskStore() *memTaskStore {
@@ -258,14 +260,97 @@ func (s *memTaskStore) ExpireWakesForTask(ctx context.Context, taskRowID uuid.UU
 	return n, nil
 }
 
-func (s *memTaskStore) ListDueWakes(context.Context, time.Time, int) ([]store.MCPTaskWakeDue, error) {
-	return nil, nil
+// ListDueWakes returns the pending and no_sink wakes of all tenants with
+// next_attempt_at <= now, oldest first, like the SQL stores.
+func (s *memTaskStore) ListDueWakes(_ context.Context, now time.Time, limit int) ([]store.MCPTaskWakeDue, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []store.MCPTaskWakeDue
+	for _, w := range s.wakes {
+		if (w.State != store.MCPWakeStatePending && w.State != store.MCPWakeStateNoSink) || w.NextAttemptAt.After(now) {
+			continue
+		}
+		r, ok := s.rows[w.TaskRowID]
+		if !ok || r.TenantID != w.TenantID {
+			continue
+		}
+		out = append(out, store.MCPTaskWakeDue{Wake: *w, Task: *cloneTask(r)})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Wake.NextAttemptAt.Equal(out[j].Wake.NextAttemptAt) {
+			return out[i].Wake.NextAttemptAt.Before(out[j].Wake.NextAttemptAt)
+		}
+		return out[i].Wake.CreatedAt.Before(out[j].Wake.CreatedAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
-func (s *memTaskStore) MarkWakeOutcome(context.Context, string, string, time.Time) error { return nil }
+// MarkWakeOutcome records one attempt in the tenant of ctx. delivered_at
+// comes from the clock of the store.
+func (s *memTaskStore) MarkWakeOutcome(ctx context.Context, wakeID, state string, next time.Time) error {
+	tid, err := memTenant(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, ok := s.wakes[wakeID]
+	if !ok || w.TenantID != tid {
+		return nil
+	}
+	w.State = state
+	w.NextAttemptAt = next
+	w.Attempts++
+	if state == store.MCPWakeStateDelivered && w.DeliveredAt == nil {
+		at := s.clockNow()
+		w.DeliveredAt = &at
+	}
+	return nil
+}
 
-func (s *memTaskStore) WakeThreadStats(context.Context, string, time.Time) (store.MCPWakeThreadStats, error) {
-	return store.MCPWakeThreadStats{}, nil
+// WakeThreadStats describes the delivered wakes of a thread in the tenant
+// of ctx.
+func (s *memTaskStore) WakeThreadStats(ctx context.Context, threadKey string, since time.Time) (store.MCPWakeThreadStats, error) {
+	var stats store.MCPWakeThreadStats
+	tid, err := memTenant(ctx)
+	if err != nil {
+		return stats, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, w := range s.wakes {
+		if w.TenantID != tid || w.ThreadKey != threadKey || w.DeliveredAt == nil {
+			continue
+		}
+		if stats.LastDeliveredAt == nil || w.DeliveredAt.After(*stats.LastDeliveredAt) {
+			at := *w.DeliveredAt
+			stats.LastDeliveredAt = &at
+		}
+		if !w.DeliveredAt.Before(since) {
+			stats.DeliveredSince++
+		}
+	}
+	return stats, nil
+}
+
+func (s *memTaskStore) clockNow() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
+}
+
+// wake returns a copy of one wake row without a tenant check.
+func (s *memTaskStore) wake(id string) store.MCPTaskWake {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if w, ok := s.wakes[id]; ok {
+		return *w
+	}
+	return store.MCPTaskWake{}
 }
 
 // snapshot returns a copy of a row without a tenant check.

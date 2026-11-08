@@ -67,6 +67,56 @@ A response with an unknown ID, for example a late answer to a cancelled request,
 At most 8 such requests wait for a response at the same time.
 When the connection stops, every waiting request fails.
 
+### Wake delivery
+
+When the client declares `buzz.wake`, the adapter calls `acp.wake.subscribe {agentId}` after `initialize` and again after every Gateway reconnect, also while it is idle.
+The Gateway then sends wakes of watched MCP tasks of that agent to this connection.
+For each wake the adapter sends this request to the client, inside or outside a prompt, and waits at most 30 seconds:
+
+```json
+{"jsonrpc": "2.0", "id": "goclaw-17", "method": "_buzz/wake",
+ "params": {"wakeId": "w_3f9c...", "reason": "input_required",
+            "thread": {"channelId": "...", "rootEventId": "..."}, "sessionId": "8a1e...",
+            "task": {"server": "archon", "taskId": "run-123", "status": "input_required", "lastUpdatedAt": "2026-11-08T03:12:00Z"},
+            "prompt": "[goclaw task update] Archon run run-123 needs approval. ...", "createdAt": "2026-11-08T03:12:01Z"}}
+```
+
+- `reason` is `input_required`, `pr_ready`, `completed`, `failed` or `cancelled`.
+- `thread` is the `buzz.thread` object of the turn that started the task, unchanged, or `null`.
+- `sessionId` is the ACP session of that turn; it is often gone and is for information only.
+- `prompt` is GoClaw text of at most 2 KiB built from stored fields only. No text of the MCP server goes into a wake. The whole frame is at most 16 KiB.
+- A retry or a Gateway restart sends the same `wakeId`.
+
+The client answers when it has queued or refused the turn: `{"outcome": "accepted" | "duplicate" | "busy"}`.
+`accepted` and `duplicate` mark the wake delivered. `busy` makes the Gateway retry after 30 seconds.
+`-32601` means the client does not support wakes; the Gateway tries another subscribed connection, else the wake waits for a new subscription.
+Any other error or a timeout is retried after 30 seconds, 1, 2, 5 and 10 minutes, then every 30 minutes until the task expires.
+The Gateway also keeps the per-thread limits of Buzz: one wake in flight, at least 30 seconds between delivered wakes, and at most 20 delivered wakes per hour.
+
+### Input requests in a turn
+
+When the client declares `elicitation.form`, a tool of the turn (for example `mcp_task` with action `input`) can ask the people of the thread a question.
+The adapter sends `elicitation/create {sessionId, toolCallId, mode: "form", message, requestedSchema}`, where `toolCallId` is the ID of the tool call in the `tool_call` update of the same turn.
+The request has no deadline beyond the prompt.
+The client returns `{"action": "accept", "content": {...}}`, `decline` or `cancel`. The adapter sends the content back unchanged.
+A client error or a transport error gives `cancel`.
+
+### Gateway methods for wakes and input
+
+| Name | Kind | Payload |
+|------|------|---------|
+| `chat.send` param `acpClient` | field | `{elicitationForm, wake, thread?, acpSessionId}` |
+| `acp.wake.subscribe` | method, adapter → Gateway | `{agentId}` → `{}`; only for an agent that the connection key may run |
+| `acp.wake` | event, Gateway → one adapter | `{wakeId, params}`; `params` are the `_buzz/wake` params |
+| `acp.wake.ack` | method, adapter → Gateway | `{wakeId, outcome}` → `{}`; outcome `accepted`, `duplicate`, `busy`, `unsupported` (`-32601`) or `failed` |
+| `acp.input.request` | event, Gateway → adapter in a prompt | `{sessionKey, acpGeneration, requestId, toolCallId, mode: "form", message, requestedSchema}` |
+| `acp.input.respond` | method, adapter → Gateway | `{sessionKey, acpGeneration, requestId, action, content?}` → `{}` |
+
+A wake sink is bound to the tenant and user of the connection and to the agent; a wake of a task goes only to a connection of the same tenant, agent and user.
+With two subscribed connections, the Gateway uses the one that subscribed last.
+An input answer is accepted only from the connection, session key and generation of the run that asked; a second answer is refused.
+An older adapter does not subscribe, so its wakes wait and nothing is sent. An older Gateway refuses `acp.wake.subscribe`; the adapter then tries again only on its next connection.
+
 ## Sessions and cancellation
 
 Each ACP session gets an opaque ID and an internal Gateway session key for the fixed `--agent` value.
@@ -111,6 +161,7 @@ A manually configured server launcher does not automatically copy changes from t
 
 The adapter limits input lines, output frames, prompt size, active sessions, queued frames, pending requests, pending requests to the client, thread context size, MCP servers, discovered tools, and Gateway frame size.
 The adapter accepts up to 384 KiB of prompt text and reserves 480 KiB for serialized Gateway frames below the Gateway 512 KiB connection limit.
+A prompt is accepted only when its `chat.send` frame, with the thread context and the `acpClient` fields, also fits in 480 KiB.
 The agent keeps the full ACP prompt, including the current event after conversation history.
 The final merged ACP input is rejected above 480 KiB instead of being truncated.
 Ordinary chat messages still use `gateway.max_message_chars`.

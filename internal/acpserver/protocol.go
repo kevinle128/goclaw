@@ -277,7 +277,10 @@ func DecodePromptParams(raw json.RawMessage) (PromptParams, *RPCError) {
 		}
 		params.Prompt = append(params.Prompt, text)
 	}
-	if _, err := MarshalGatewayRequest(params); err != nil {
+	data, err := MarshalGatewayRequest(params)
+	if err != nil || len(data)+len(thread)+ChatSendFrameOverhead > MaxGatewayFrameBytes {
+		// chat.send also carries the thread and the other fields; it must fit
+		// in one Gateway frame.
 		return PromptParams{}, invalidParams()
 	}
 	return params, nil

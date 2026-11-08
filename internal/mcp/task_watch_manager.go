@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -51,6 +52,10 @@ type TaskWatchManager struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// wakeNotify, when set, runs after each new wake row (it wakes the
+	// wake dispatcher). It is set once at gateway start.
+	wakeNotify atomic.Pointer[func()]
 
 	mu       sync.Mutex
 	watchers map[uuid.UUID]*taskWatcher
@@ -111,6 +116,26 @@ func (m *TaskWatchManager) Stop() {
 	case <-done:
 	case <-time.After(stopWaitLimit):
 		slog.Warn("mcp.task.watch_stop_timeout", "waited", stopWaitLimit.String())
+	}
+}
+
+// SetWakeNotifier sets a function that runs after each new wake row, for
+// example WakeDispatcher.Kick. It must return quickly.
+func (m *TaskWatchManager) SetWakeNotifier(fn func()) {
+	if fn == nil {
+		m.wakeNotify.Store(nil)
+		return
+	}
+	m.wakeNotify.Store(&fn)
+}
+
+// notifyWake runs the hooks for a new wake row.
+func (m *TaskWatchManager) notifyWake(ctx context.Context, wake store.MCPTaskWake) {
+	if m.onWake != nil {
+		m.onWake(ctx, wake)
+	}
+	if fn := m.wakeNotify.Load(); fn != nil {
+		(*fn)()
 	}
 }
 

@@ -365,5 +365,12 @@ func init() {
 		MsgPackagesUpdatesReasonLocked:             "软件包数据库已锁定",
 		MsgPackagesUpdatesReasonDiskFull:           "磁盘已满",
 		MsgPackagesUpdatesReasonHelperUnavailable:  "特权助手不可用",
+		// ACP wake delivery and input relay
+		MsgACPRelayUnavailable: "ACP 唤醒与输入转发不可用",
+		MsgACPInvalidParams:    "%s 参数无效",
+		MsgACPAgentNotAllowed:  "此连接无权运行智能体 %s",
+		MsgACPSubscribeLimit:   "此连接的唤醒订阅过多",
+		MsgACPRequestNotFound:  "未找到 ACP 请求或请求已被回答",
+		MsgACPRequestNotOwner:  "ACP 请求属于其他连接或运行",
 	})
 }
