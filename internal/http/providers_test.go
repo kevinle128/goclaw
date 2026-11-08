@@ -344,3 +344,39 @@ func TestProvidersHandlerUpdateRejectsIncompatibleEmbeddingDimensions(t *testing
 		t.Fatalf("embedding dimensions = %+v, want 1536 preserved", es)
 	}
 }
+
+// TestProvidersHandlerCreateCustomTypeAccepted verifies that the server accepts
+// provider_type="custom" as a first-class type, storing it and returning 201.
+func TestProvidersHandlerCreateCustomTypeAccepted(t *testing.T) {
+	token := setupProvidersAdminToken(t)
+	providerStore := newMockProviderStore()
+	handler := NewProvidersHandler(providerStore, newMockSecretsStore(), nil, "")
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	body := `{
+		"name": "local-9router",
+		"provider_type": "custom",
+		"api_base": "http://127.0.0.1:20128/v1",
+		"api_key": "rk-test",
+		"enabled": true,
+		"settings": {"default_model": "cc/claude-opus-4-6"}
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/providers", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status code = %d, want %d, body=%s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	if len(providerStore.providers) != 1 {
+		t.Fatalf("provider store len = %d, want 1", len(providerStore.providers))
+	}
+	for _, p := range providerStore.providers {
+		if p.ProviderType != "custom" {
+			t.Errorf("stored provider_type = %q, want custom", p.ProviderType)
+		}
+	}
+}

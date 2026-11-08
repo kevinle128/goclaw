@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -64,6 +65,13 @@ func (h *ProvidersHandler) handleListProviderModels(w http.ResponseWriter, r *ht
 	// ACP agents don't need an API key — return hardcoded models
 	if p.ProviderType == store.ProviderACP {
 		respond(acpModels())
+		return
+	}
+
+	// Custom provider: user declares the model; we never call the upstream /models endpoint.
+	// Returns a single-item list from Settings.default_model, or empty if unset.
+	if p.ProviderType == store.ProviderCustom {
+		respond(customProviderModels(p.Settings))
 		return
 	}
 
@@ -139,6 +147,21 @@ func reasoningDefaultsForModels(
 		}
 	}
 	return nil
+}
+
+// customProviderModels returns the single user-declared model stored in
+// Settings.default_model. Empty list if unset. Never contacts the upstream.
+func customProviderModels(settings json.RawMessage) []ModelInfo {
+	if len(settings) == 0 {
+		return []ModelInfo{}
+	}
+	var s struct {
+		DefaultModel string `json:"default_model"`
+	}
+	if err := json.Unmarshal(settings, &s); err != nil || s.DefaultModel == "" {
+		return []ModelInfo{}
+	}
+	return []ModelInfo{{ID: s.DefaultModel}}
 }
 
 func withReasoningCapabilities(models []ModelInfo) []ModelInfo {

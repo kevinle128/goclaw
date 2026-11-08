@@ -129,7 +129,8 @@
     "perplexity": "Perplexity",
     "chatgpt_oauth": "ChatGPT Subscription (OAuth)",
     "yescale": "YesScale",
-    "acp": "ACP"
+    "acp": "ACP",
+    "custom": "自定义提供商"
   },
   "acp": {
     "description": "将兼容 ACP 的编程代理作为子进程进行编排。无需 API 密钥。",

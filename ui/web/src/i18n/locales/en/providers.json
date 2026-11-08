@@ -115,7 +115,8 @@
     "perplexity": "Perplexity",
     "chatgpt_oauth": "ChatGPT Subscription (OAuth)",
     "yescale": "YesScale",
-    "acp": "ACP"
+    "acp": "ACP",
+    "custom": "Custom Provider"
   },
   "acp": {
     "description": "Orchestrate ACP-compatible coding agents as subprocesses. No API key needed.",

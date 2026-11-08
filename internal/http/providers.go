@@ -270,6 +270,10 @@ var localProviderTypes = map[string]bool{
 	store.ProviderOllama:    true,
 	store.ProviderClaudeCLI: true,
 	store.ProviderACP:       true,
+	// "custom" is explicitly opt-in for local routers (9router, LiteLLM) and
+	// bring-your-own proxies; SSRF protection is traded for the flexibility
+	// this provider type exists to enable.
+	store.ProviderCustom: true,
 }
 
 // validateProviderURL rejects provider base URLs pointing to internal/private networks.

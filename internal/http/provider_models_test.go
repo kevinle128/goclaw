@@ -481,3 +481,100 @@ func TestProvidersHandlerListProviderModelsOllamaCloudSendsAuthHeader(t *testing
 		t.Errorf("models = %#v, want [{ID: cloud-model:latest}]", result.Models)
 	}
 }
+
+// TestProvidersHandlerListProviderModelsCustomReturnsDefaultModel verifies that
+// a provider with type="custom" returns its Settings.default_model as a single-item
+// list WITHOUT contacting the upstream /models endpoint.
+func TestProvidersHandlerListProviderModelsCustomReturnsDefaultModel(t *testing.T) {
+	token := setupProvidersAdminToken(t)
+
+	var upstreamHits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(upstream.Close)
+
+	providerStore := newMockProviderStore()
+	provider := &store.LLMProviderData{
+		BaseModel:    store.BaseModel{ID: uuid.New()},
+		Name:         "local-9router",
+		ProviderType: store.ProviderCustom,
+		APIBase:      upstream.URL,
+		APIKey:       "any-key",
+		Enabled:      true,
+		Settings:     json.RawMessage(`{"default_model": "cc/claude-opus-4-6"}`),
+	}
+	if err := providerStore.CreateProvider(t.Context(), provider); err != nil {
+		t.Fatalf("CreateProvider() error = %v", err)
+	}
+
+	handler := NewProvidersHandler(providerStore, newMockSecretsStore(), nil, "")
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/providers/"+provider.ID.String()+"/models", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var result ProviderModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+
+	if len(result.Models) != 1 {
+		t.Fatalf("models len = %d, want 1", len(result.Models))
+	}
+	if result.Models[0].ID != "cc/claude-opus-4-6" {
+		t.Errorf("models[0].id = %q, want cc/claude-opus-4-6", result.Models[0].ID)
+	}
+	if upstreamHits != 0 {
+		t.Errorf("upstream hit %d times, want 0 — custom provider must not fetch /models", upstreamHits)
+	}
+}
+
+// TestProvidersHandlerListProviderModelsCustomEmptyWhenNoDefault verifies graceful
+// behavior when a custom provider has no default_model in Settings: returns empty
+// list, still no upstream call.
+func TestProvidersHandlerListProviderModelsCustomEmptyWhenNoDefault(t *testing.T) {
+	token := setupProvidersAdminToken(t)
+
+	providerStore := newMockProviderStore()
+	provider := &store.LLMProviderData{
+		BaseModel:    store.BaseModel{ID: uuid.New()},
+		Name:         "unconfigured-custom",
+		ProviderType: store.ProviderCustom,
+		APIBase:      "http://127.0.0.1:1/v1",
+		APIKey:       "k",
+		Enabled:      true,
+	}
+	if err := providerStore.CreateProvider(t.Context(), provider); err != nil {
+		t.Fatalf("CreateProvider() error = %v", err)
+	}
+
+	handler := NewProvidersHandler(providerStore, newMockSecretsStore(), nil, "")
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/providers/"+provider.ID.String()+"/models", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var result ProviderModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if len(result.Models) != 0 {
+		t.Errorf("models len = %d, want 0 when default_model unset", len(result.Models))
+	}
+}

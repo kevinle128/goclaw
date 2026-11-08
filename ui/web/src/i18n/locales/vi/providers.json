@@ -120,7 +120,8 @@
     "perplexity": "Perplexity",
     "chatgpt_oauth": "ChatGPT Subscription (OAuth)",
     "yescale": "YesScale",
-    "acp": "ACP"
+    "acp": "ACP",
+    "custom": "Nhà cung cấp tùy chỉnh"
   },
   "acp": {
     "description": "Điều phối các agent lập trình tương thích ACP dưới dạng tiến trình con. Không cần API key.",
