@@ -26,6 +26,9 @@ The API key can also be supplied with `--api-key`.
 Command-line arguments can be visible to other local processes, so an environment variable or process supervisor is safer.
 The command does not read `--token`, `GOCLAW_GATEWAY_TOKEN`, or the Gateway token from `config.json`.
 
+`--max-prompt-duration` sets the time after which the adapter cancels a running prompt.
+The default is `2h`. The value must be from `1m` to `168h`, otherwise the command stops with an error.
+
 ## ACP compatibility
 
 The server implements ACP version 1.
@@ -35,6 +38,34 @@ GoClaw does not claim support for official ACP version 2.
 
 The first release supports `initialize`, `session/new`, `session/prompt`, `session/cancel`, and `session/update`.
 It does not support `session/load`, client-driven session release, image or audio prompts, HTTP MCP, SSE MCP, or automatic prompt replay.
+
+### Capabilities
+
+The `initialize` result advertises `agentCapabilities._meta["buzz.wake"] = {"version": 1}`.
+The adapter reads these client capabilities from the `initialize` request:
+
+- Wake: only when `clientCapabilities._meta["buzz.wake"]` is an object with `version` equal to the number `1`. Any other value means that the client does not support wake requests.
+- Elicitation form or URL mode: only when `clientCapabilities.elicitation.form` (or `.url`) is present and not `null`. `{}` and `{"form": null}` do not enable form mode.
+
+A malformed capability value is treated as not supported. It does not fail `initialize`.
+
+### Thread context
+
+`session/new` and `session/prompt` accept `_meta["buzz.thread"]`.
+The value must be a JSON object of at most 4 KiB in compact form, otherwise the request fails with `-32602`.
+The adapter keeps the object unchanged and does not read its fields.
+The `session/new` value applies to every prompt of the session.
+A `session/prompt` value replaces it for that turn only.
+Other `_meta` keys are ignored.
+
+### Requests to the client
+
+The adapter can send its own JSON-RPC requests to the client, inside or outside a prompt.
+These requests use string IDs of the form `goclaw-<n>`, so they never collide with client request IDs.
+The client answers with a normal JSON-RPC response with the same ID.
+A response with an unknown ID, for example a late answer to a cancelled request, is dropped without an error frame.
+At most 8 such requests wait for a response at the same time.
+When the connection stops, every waiting request fails.
 
 ## Sessions and cancellation
 
@@ -78,7 +109,7 @@ A manually configured server launcher does not automatically copy changes from t
 
 ## Resource limits
 
-The adapter limits input lines, output frames, prompt size, active sessions, queued frames, pending requests, MCP servers, discovered tools, and Gateway frame size.
+The adapter limits input lines, output frames, prompt size, active sessions, queued frames, pending requests, pending requests to the client, thread context size, MCP servers, discovered tools, and Gateway frame size.
 The adapter accepts up to 384 KiB of prompt text and reserves 480 KiB for serialized Gateway frames below the Gateway 512 KiB connection limit.
 The agent keeps the full ACP prompt, including the current event after conversation history.
 The final merged ACP input is rejected above 480 KiB instead of being truncated.

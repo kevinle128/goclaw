@@ -1,6 +1,7 @@
 package acpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,9 @@ type ServerConfig struct {
 	WorkspaceRoot string
 	MCPExecRoots  []string
 	Version       string
+	// MaxPromptDuration cancels a prompt that runs longer. Zero selects
+	// MaxPromptDurationDefault.
+	MaxPromptDuration time.Duration
 }
 
 type Server struct {
@@ -42,11 +46,16 @@ func NewServer(config ServerConfig) (*Server, error) {
 	if config.Gateway == nil || config.AgentID == "" || config.WorkspaceRoot == "" {
 		return nil, errors.New("ACP server requires gateway, agent, and workspace root")
 	}
+	if config.MaxPromptDuration != 0 {
+		if err := ValidateMaxPromptDuration(config.MaxPromptDuration); err != nil {
+			return nil, err
+		}
+	}
 	root, err := canonicalDirectory(config.WorkspaceRoot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve ACP workspace root: %w", err)
 	}
-	return &Server{gateway: config.Gateway, agentID: config.AgentID, workspaceRoot: root, version: config.Version, mcpExecRoots: append([]string(nil), config.MCPExecRoots...), sessions: NewSessionRegistry()}, nil
+	return &Server{gateway: config.Gateway, agentID: config.AgentID, workspaceRoot: root, version: config.Version, mcpExecRoots: append([]string(nil), config.MCPExecRoots...), sessions: NewSessionRegistry(config.MaxPromptDuration)}, nil
 }
 
 func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) error {
@@ -105,7 +114,7 @@ func (s *Server) handleNewSession(ctx context.Context, params NewSessionParams) 
 		return NewSessionResult{}, &RPCError{Code: CodeInvalidParams, Message: "Invalid workspace"}
 	}
 	id := uuid.NewString()
-	record := &sessionRecord{ID: id, SessionKey: sessions.BuildWSSessionKey(s.agentID, id), CWD: cwd}
+	record := &sessionRecord{ID: id, SessionKey: sessions.BuildWSSessionKey(s.agentID, id), CWD: cwd, thread: bytes.Clone(params.Thread)}
 	if len(params.MCPServers) > 0 {
 		manager, managerErr := NewSessionMCPManager(s.workspaceRoot, s.mcpExecRoots)
 		if managerErr != nil {
@@ -129,7 +138,7 @@ func (s *Server) handleNewSession(ctx context.Context, params NewSessionParams) 
 }
 
 func (s *Server) handlePrompt(ctx context.Context, params PromptParams) (PromptResult, error) {
-	record, generation, promptCtx, err := s.sessions.BeginPrompt(params.SessionID, ctx)
+	record, generation, promptCtx, err := s.sessions.BeginPrompt(params.SessionID, ctx, params.Thread)
 	if err != nil {
 		return PromptResult{}, err
 	}
@@ -234,6 +243,12 @@ func (s *Server) handlePrompt(ctx context.Context, params PromptParams) (PromptR
 			return PromptResult{StopReason: "cancelled"}, nil
 		}
 	}
+}
+
+// PromptContext returns the ACP session ID and thread context of the active
+// prompt with this generation.
+func (s *Server) PromptContext(sessionID string, generation uint64) (PromptContext, bool) {
+	return s.sessions.PromptContext(sessionID, generation)
 }
 
 func (s *Server) handleMCPToolCall(ctx context.Context, record *sessionRecord, event GatewayEvent, expectedCapabilityID string, expectedGeneration uint64) {

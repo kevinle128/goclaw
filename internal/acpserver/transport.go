@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -19,6 +20,9 @@ var (
 	ErrTransportWrite      = errors.New("ACP output write failed")
 	ErrTransportClosed     = errors.New("ACP transport is closed")
 	ErrRequestBackpressure = errors.New("ACP request limit reached")
+	// ErrOutboundRequestBackpressure means too many requests to the client
+	// wait for a response. The transport stays open.
+	ErrOutboundRequestBackpressure = errors.New("ACP outbound request limit reached")
 )
 
 type Handler struct {
@@ -40,6 +44,13 @@ type Transport struct {
 	requestSlots chan struct{}
 	requests     sync.WaitGroup
 
+	// outbound holds requests sent to the client that wait for a response,
+	// keyed by their "goclaw-<n>" id.
+	outboundMu     sync.Mutex
+	outboundNext   uint64
+	outbound       map[string]chan outboundResponse
+	outboundClosed bool
+
 	sendMu    sync.RWMutex
 	outputQ   chan []byte
 	stopped   bool
@@ -49,9 +60,22 @@ type Transport struct {
 }
 
 type connectionState struct {
-	initialized     bool
-	sessions        map[string]struct{}
-	pendingSessions int
+	initialized        bool
+	clientCapabilities ClientCapabilities
+	sessions           map[string]struct{}
+	pendingSessions    int
+}
+
+type outboundResponse struct {
+	result json.RawMessage
+	rpcErr *RPCError
+}
+
+type outboundRequestEnvelope struct {
+	JSONRPC string `json:"jsonrpc"`
+	ID      string `json:"id"`
+	Method  string `json:"method"`
+	Params  any    `json:"params,omitempty"`
 }
 
 type requestEnvelope struct {
@@ -86,6 +110,7 @@ func NewTransport(input io.Reader, output io.Writer, handler Handler, agentVersi
 			sessions: make(map[string]struct{}),
 		},
 		requestSlots: make(chan struct{}, MaxPendingRequests),
+		outbound:     make(map[string]chan outboundResponse),
 	}
 }
 
@@ -162,6 +187,9 @@ func (t *Transport) Serve(ctx context.Context) error {
 	}
 
 finished:
+	// No response can arrive after the read loop ends. Fail the waiting
+	// requests first, so handlers that wait on them can return.
+	t.closeOutbound()
 	if serveErr != nil {
 		cancel()
 	}
@@ -202,6 +230,116 @@ func (t *Transport) SessionRawUpdate(ctx context.Context, sessionID string, upda
 	})
 }
 
+// Request sends a JSON-RPC request to the client and waits for its response
+// or for the end of ctx. It works inside and outside a prompt. A JSON-RPC
+// error from the client is returned as *RPCError with a nil error. A nil
+// params value is not sent.
+func (t *Transport) Request(ctx context.Context, method string, params any) (json.RawMessage, *RPCError, error) {
+	if method == "" {
+		return nil, nil, errors.New("ACP request method is required")
+	}
+	id, responses, err := t.registerOutbound()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer t.unregisterOutbound(id)
+	if err := t.sendFrame(ctx, outboundRequestEnvelope{JSONRPC: "2.0", ID: id, Method: method, Params: params}); err != nil {
+		return nil, nil, err
+	}
+	select {
+	case response, ok := <-responses:
+		if !ok {
+			return nil, nil, ErrTransportClosed
+		}
+		return response.result, response.rpcErr, nil
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	}
+}
+
+// ClientCapabilities returns the capabilities from the client initialize
+// request, or the zero value before initialize.
+func (t *Transport) ClientCapabilities() ClientCapabilities {
+	t.stateMu.Lock()
+	defer t.stateMu.Unlock()
+	return t.state.clientCapabilities
+}
+
+func (t *Transport) registerOutbound() (string, chan outboundResponse, error) {
+	t.outboundMu.Lock()
+	defer t.outboundMu.Unlock()
+	if t.outboundClosed {
+		return "", nil, ErrTransportClosed
+	}
+	if len(t.outbound) >= MaxPendingOutboundRequests {
+		return "", nil, ErrOutboundRequestBackpressure
+	}
+	t.outboundNext++
+	id := "goclaw-" + strconv.FormatUint(t.outboundNext, 10)
+	// One buffered slot: the read loop never blocks on delivery.
+	responses := make(chan outboundResponse, 1)
+	t.outbound[id] = responses
+	return id, responses, nil
+}
+
+func (t *Transport) unregisterOutbound(id string) {
+	t.outboundMu.Lock()
+	delete(t.outbound, id)
+	t.outboundMu.Unlock()
+}
+
+func (t *Transport) closeOutbound() {
+	t.outboundMu.Lock()
+	defer t.outboundMu.Unlock()
+	t.outboundClosed = true
+	for id, responses := range t.outbound {
+		close(responses)
+		delete(t.outbound, id)
+	}
+}
+
+// isResponseFrame reports whether a frame is a JSON-RPC response: version
+// 2.0, a valid id, no method, and exactly one of result and error.
+func isResponseFrame(fields map[string]json.RawMessage, msg requestEnvelope, hasID, validID bool) bool {
+	_, hasMethod := fields["method"]
+	_, hasResult := fields["result"]
+	_, hasError := fields["error"]
+	return msg.JSONRPC == "2.0" && hasID && validID && !hasMethod && hasResult != hasError
+}
+
+// deliverResponse gives a client response to the waiting request with the
+// same id. A response with an unknown id, for example one that arrives after
+// its request was cancelled, is dropped without an error frame.
+func (t *Transport) deliverResponse(fields map[string]json.RawMessage) {
+	var id string
+	if json.Unmarshal(fields["id"], &id) != nil {
+		return
+	}
+	t.outboundMu.Lock()
+	responses, ok := t.outbound[id]
+	delete(t.outbound, id)
+	t.outboundMu.Unlock()
+	if !ok {
+		return
+	}
+	var response outboundResponse
+	if raw, hasResult := fields["result"]; hasResult {
+		response.result = raw
+	} else {
+		var wire struct {
+			Code    *int   `json:"code"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(fields["error"], &wire) != nil || wire.Code == nil {
+			// The caller gets an error instead of a wait until its deadline.
+			response.rpcErr = &RPCError{Code: CodeInternalError, Message: "Malformed error response"}
+		} else {
+			response.rpcErr = &RPCError{Code: *wire.Code, Message: wire.Message}
+		}
+	}
+	responses <- response
+}
+
 func (t *Transport) dispatch(ctx context.Context, line []byte) error {
 	var msg requestEnvelope
 	var fields map[string]json.RawMessage
@@ -219,6 +357,10 @@ func (t *Transport) dispatch(ctx context.Context, line []byte) error {
 	}
 
 	id, hasID, validID := parseRequestID(fields)
+	if isResponseFrame(fields, msg, hasID, validID) {
+		t.deliverResponse(fields)
+		return nil
+	}
 	if msg.JSONRPC != "2.0" || msg.Method == "" || len(msg.Result) != 0 || len(msg.Error) != 0 || !validID {
 		if !hasID {
 			return nil
@@ -307,7 +449,6 @@ func (t *Transport) initialize(ctx context.Context, id, raw json.RawMessage) err
 	if rpcErr != nil {
 		return t.sendError(ctx, id, rpcErr)
 	}
-	_ = params
 
 	t.stateMu.Lock()
 	if t.state.initialized {
@@ -315,6 +456,7 @@ func (t *Transport) initialize(ctx context.Context, id, raw json.RawMessage) err
 		return t.sendError(ctx, id, &RPCError{Code: CodeInvalidRequest, Message: "Connection already initialized"})
 	}
 	t.state.initialized = true
+	t.state.clientCapabilities = ParseClientCapabilities(params.ClientCapabilities)
 	t.stateMu.Unlock()
 
 	return t.sendResult(ctx, id, InitializeResult{
@@ -323,6 +465,7 @@ func (t *Transport) initialize(ctx context.Context, id, raw json.RawMessage) err
 			LoadSession:        false,
 			PromptCapabilities: PromptCapabilities{},
 			MCPCapabilities:    MCPCapabilities{},
+			Meta:               map[string]any{WakeCapabilityKey: map[string]int{"version": WakeCapabilityVersion}},
 		},
 		AgentInfo:   AgentInfo{Name: "goclaw", Title: "GoClaw", Version: t.agentVersion},
 		AuthMethods: []any{},

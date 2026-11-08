@@ -62,6 +62,50 @@ type AgentCapabilities struct {
 	LoadSession        bool               `json:"loadSession"`
 	PromptCapabilities PromptCapabilities `json:"promptCapabilities"`
 	MCPCapabilities    MCPCapabilities    `json:"mcpCapabilities"`
+	Meta               map[string]any     `json:"_meta,omitempty"`
+}
+
+// WakeCapabilityKey is the _meta key for the agent-initiated wake request.
+// Both sides advertise it with exactly {"version": 1}.
+const (
+	WakeCapabilityKey     = "buzz.wake"
+	WakeCapabilityVersion = 1
+	ThreadContextKey      = "buzz.thread"
+)
+
+// ClientCapabilities holds the client features that change agent behaviour.
+type ClientCapabilities struct {
+	ElicitationForm bool
+	ElicitationURL  bool
+	Wake            bool
+}
+
+// ParseClientCapabilities reads the features from clientCapabilities. Each
+// part is decoded alone, so a bad shape in one part does not hide another.
+// An absent or malformed value gives false.
+func ParseClientCapabilities(raw json.RawMessage) ClientCapabilities {
+	var caps ClientCapabilities
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return caps
+	}
+	var elicitation map[string]json.RawMessage
+	if json.Unmarshal(fields["elicitation"], &elicitation) == nil {
+		caps.ElicitationForm = presentNotNull(elicitation["form"])
+		caps.ElicitationURL = presentNotNull(elicitation["url"])
+	}
+	var meta map[string]json.RawMessage
+	if json.Unmarshal(fields["_meta"], &meta) == nil {
+		var wake map[string]json.RawMessage
+		var version int64
+		caps.Wake = json.Unmarshal(meta[WakeCapabilityKey], &wake) == nil && wake != nil &&
+			json.Unmarshal(wake["version"], &version) == nil && version == WakeCapabilityVersion
+	}
+	return caps
+}
+
+func presentNotNull(raw json.RawMessage) bool {
+	return len(raw) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
 type PromptCapabilities struct {
@@ -78,6 +122,8 @@ type MCPCapabilities struct {
 type NewSessionParams struct {
 	CWD        string      `json:"cwd"`
 	MCPServers []MCPServer `json:"mcpServers"`
+	// Thread is the compact JSON object from _meta["buzz.thread"], or nil.
+	Thread json.RawMessage `json:"-"`
 }
 
 type MCPServer struct {
@@ -110,6 +156,9 @@ type TextContent struct {
 type PromptParams struct {
 	SessionID string        `json:"sessionId"`
 	Prompt    []TextContent `json:"prompt"`
+	// Thread is the compact JSON object from _meta["buzz.thread"], or nil.
+	// It is not part of the serialized prompt budget.
+	Thread json.RawMessage `json:"-"`
 }
 
 type PromptResult struct {
@@ -163,6 +212,11 @@ func DecodeNewSessionParams(raw json.RawMessage) (NewSessionParams, *RPCError) {
 		return NewSessionParams{}, invalidParams()
 	}
 
+	thread, rpcErr := decodeThreadContext(wire.Meta)
+	if rpcErr != nil {
+		return NewSessionParams{}, rpcErr
+	}
+
 	var servers []MCPServer
 	if err := decodeStrict(wire.MCPServers, &servers); err != nil || servers == nil || len(servers) > MaxMCPServersPerSession {
 		return NewSessionParams{}, invalidParams()
@@ -186,7 +240,7 @@ func DecodeNewSessionParams(raw json.RawMessage) (NewSessionParams, *RPCError) {
 			}
 		}
 	}
-	return NewSessionParams{CWD: *wire.CWD, MCPServers: servers}, nil
+	return NewSessionParams{CWD: *wire.CWD, MCPServers: servers, Thread: thread}, nil
 }
 
 func DecodePromptParams(raw json.RawMessage) (PromptParams, *RPCError) {
@@ -199,7 +253,12 @@ func DecodePromptParams(raw json.RawMessage) (PromptParams, *RPCError) {
 		return PromptParams{}, invalidParams()
 	}
 
-	params := PromptParams{SessionID: *wire.SessionID, Prompt: make([]TextContent, 0, len(wire.Prompt))}
+	thread, rpcErr := decodeThreadContext(wire.Meta)
+	if rpcErr != nil {
+		return PromptParams{}, rpcErr
+	}
+
+	params := PromptParams{SessionID: *wire.SessionID, Prompt: make([]TextContent, 0, len(wire.Prompt)), Thread: thread}
 	textBytes := 0
 	for _, block := range wire.Prompt {
 		var kind struct {
@@ -222,6 +281,29 @@ func DecodePromptParams(raw json.RawMessage) (PromptParams, *RPCError) {
 		return PromptParams{}, invalidParams()
 	}
 	return params, nil
+}
+
+// decodeThreadContext reads _meta["buzz.thread"]. Other _meta keys and a
+// _meta value that is not an object are ignored. When the key is present, its
+// value must be a JSON object of at most MaxThreadContextBytes in compact form.
+func decodeThreadContext(meta json.RawMessage) (json.RawMessage, *RPCError) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(meta, &fields) != nil {
+		return nil, nil
+	}
+	raw, ok := fields[ThreadContextKey]
+	if !ok {
+		return nil, nil
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || object == nil {
+		return nil, invalidParams()
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil || compact.Len() > MaxThreadContextBytes {
+		return nil, invalidParams()
+	}
+	return json.RawMessage(compact.Bytes()), nil
 }
 
 func DecodeCancelParams(raw json.RawMessage) (CancelParams, *RPCError) {

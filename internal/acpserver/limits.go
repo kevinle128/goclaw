@@ -1,6 +1,7 @@
 package acpserver
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/acpbridge"
@@ -14,6 +15,11 @@ const (
 	MaxActiveSessions       = 64
 	MaxOutputQueue          = 128
 	MaxPendingRequests      = 256
+	// MaxPendingOutboundRequests bounds requests that GoClaw sends to the
+	// client and that wait for a response. Client requests use their own limit.
+	MaxPendingOutboundRequests = 8
+	// MaxThreadContextBytes bounds the compact JSON of _meta["buzz.thread"].
+	MaxThreadContextBytes   = 4 << 10
 	MaxMCPServersPerSession = 8
 	MaxTools                = 256
 	MaxMCPEntries           = 128
@@ -32,3 +38,18 @@ const (
 	SessionIdleTTL           = 30 * time.Minute
 	SessionReapInterval      = time.Minute
 )
+
+// A prompt that runs longer than its maximum duration is cancelled.
+const (
+	MaxPromptDurationDefault = 2 * time.Hour
+	MaxPromptDurationMin     = time.Minute
+	MaxPromptDurationMax     = 168 * time.Hour
+)
+
+// ValidateMaxPromptDuration rejects a duration outside the supported range.
+func ValidateMaxPromptDuration(duration time.Duration) error {
+	if duration < MaxPromptDurationMin || duration > MaxPromptDurationMax {
+		return fmt.Errorf("max prompt duration must be between %s and %s", MaxPromptDurationMin, MaxPromptDurationMax)
+	}
+	return nil
+}
