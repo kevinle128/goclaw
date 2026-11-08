@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,13 @@ const maxTaskTTL = 365 * 24 * time.Hour
 
 // stopWaitLimit bounds how long Stop waits for the watchers to end.
 const stopWaitLimit = 15 * time.Second
+
+var (
+	// errServerGone means the server record of a task row does not exist.
+	errServerGone = errors.New("mcp server not found")
+	// errServerDisabled means the server of a task row is disabled.
+	errServerDisabled = errors.New("mcp server is disabled")
+)
 
 // TaskWatchConfig configures a TaskWatchManager.
 type TaskWatchConfig struct {
@@ -61,6 +69,43 @@ type TaskWatchManager struct {
 	watchers map[uuid.UUID]*taskWatcher
 	stopped  bool
 	wg       sync.WaitGroup
+
+	// rowLocks serialize the answers of one task row and the input wakes
+	// of its watcher (one gateway process). An entry lives while a holder
+	// or a waiter uses it.
+	lockMu   sync.Mutex
+	rowLocks map[uuid.UUID]*rowLock
+}
+
+type rowLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockRow locks the row id and returns the unlock function.
+func (m *TaskWatchManager) lockRow(id uuid.UUID) (unlock func()) {
+	m.lockMu.Lock()
+	if m.rowLocks == nil {
+		m.rowLocks = make(map[uuid.UUID]*rowLock)
+	}
+	l := m.rowLocks[id]
+	if l == nil {
+		l = &rowLock{}
+		m.rowLocks[id] = l
+	}
+	l.refs++
+	m.lockMu.Unlock()
+
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		m.lockMu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(m.rowLocks, id)
+		}
+		m.lockMu.Unlock()
+	}
 }
 
 // NewTaskWatchManager creates a manager. Watchers can start at once; call
@@ -201,19 +246,22 @@ type watchConn struct {
 
 // acquire takes a pool reference for the server of row, in the tenant of
 // ctx. It uses the server record, the server defaults and the per-user
-// credentials of the row's user. Channel context credentials of the run
-// that started the task are not known here.
-func (m *TaskWatchManager) acquire(ctx context.Context, row *store.MCPTask) (*watchConn, error) {
+// credentials of userID: the row's user for a watcher, the caller for
+// mcp_task. It returns errServerGone when the server record does not exist
+// and errServerDisabled when the server is disabled.
+func (m *TaskWatchManager) acquire(ctx context.Context, row *store.MCPTask, userID string) (*watchConn, error) {
 	srv, err := m.servers.GetServer(ctx, row.ServerID)
-	if err != nil {
+	switch {
+	case errors.Is(err, sql.ErrNoRows) || (err == nil && srv == nil):
+		return nil, fmt.Errorf("%w: %s", errServerGone, row.ServerID)
+	case err != nil:
 		return nil, fmt.Errorf("load mcp server %s: %w", row.ServerID, err)
+	case !srv.Enabled:
+		return nil, fmt.Errorf("%w: %q", errServerDisabled, srv.Name)
 	}
-	if srv == nil {
-		return nil, fmt.Errorf("mcp server %s not found", row.ServerID)
-	}
-	rs := resolveCredentials(ctx, m.servers, store.MCPAccessInfo{Server: *srv}, row.UserID)
+	rs := resolveCredentials(ctx, m.servers, store.MCPAccessInfo{Server: *srv}, userID)
 	if rs == nil {
-		return nil, fmt.Errorf("mcp server %q is disabled or has no credentials for the task user", srv.Name)
+		return nil, fmt.Errorf("mcp server %q has no credentials for the task user", srv.Name)
 	}
 	// The connection belongs to the pool and outlives this watcher, so it
 	// must not end with the watcher context.
@@ -223,13 +271,13 @@ func (m *TaskWatchManager) acquire(ctx context.Context, row *store.MCPTask) (*wa
 
 	conn := &watchConn{binding: ParseTaskEvents(srv.Settings), serverName: srv.Name}
 	tenantID := store.TenantIDFromContext(ctx)
-	if rs.hasUserCreds && row.UserID != "" {
-		entry, err := m.pool.AcquireUser(connCtx, tenantID, srv.Name, row.UserID, srv.Transport, srv.Command,
+	if rs.hasUserCreds && userID != "" {
+		entry, err := m.pool.AcquireUser(connCtx, tenantID, srv.Name, userID, srv.Transport, srv.Command,
 			rs.args, rs.env, srv.URL, rs.headers, srv.TimeoutSec, opt)
 		if err != nil {
 			return nil, err
 		}
-		key := UserPoolKey(tenantID, srv.Name, row.UserID)
+		key := UserPoolKey(tenantID, srv.Name, userID)
 		conn.entry = entry
 		conn.release = func() { m.pool.ReleaseUser(key) }
 		return conn, nil

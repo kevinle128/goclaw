@@ -15,9 +15,14 @@ const (
 	MaxActiveSessions       = 64
 	MaxOutputQueue          = 128
 	MaxPendingRequests      = 256
-	// MaxPendingOutboundRequests bounds requests that GoClaw sends to the
-	// client and that wait for a response. Client requests use their own limit.
+	// MaxPendingOutboundRequests bounds requests other than _buzz/wake (for
+	// example elicitation/create) that GoClaw sends to the client and that
+	// wait for a response. Client requests use their own limit.
 	MaxPendingOutboundRequests = 8
+	// MaxPendingOutboundWakes bounds _buzz/wake requests that wait for a
+	// response. Wakes have their own limit, so open questions that wait for
+	// people cannot block them.
+	MaxPendingOutboundWakes = 4
 	// MaxThreadContextBytes bounds the compact JSON of _meta["buzz.thread"].
 	MaxThreadContextBytes   = 4 << 10
 	MaxMCPServersPerSession = 8

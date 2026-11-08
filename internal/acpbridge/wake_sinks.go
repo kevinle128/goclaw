@@ -203,13 +203,18 @@ func (w *WakeSinks) DeliverWake(ctx context.Context, tenantID, agentID uuid.UUID
 	return outcome, true
 }
 
-// candidates returns the matching sinks, last subscribed first.
+// candidates returns the matching sinks, last subscribed first. A wake
+// without a user matches no sink: it must not go to the connection of any
+// user of the agent.
 func (w *WakeSinks) candidates(tenantID, agentID uuid.UUID, userID string) []*wakeSinkState {
+	if userID == "" {
+		return nil
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	var out []*wakeSinkState
 	for key, sink := range w.sinks {
-		if key.tenantID == tenantID && key.agentID == agentID && (userID == "" || sink.UserID == userID) {
+		if key.tenantID == tenantID && key.agentID == agentID && sink.UserID == userID {
 			out = append(out, sink)
 		}
 	}

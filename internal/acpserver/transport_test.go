@@ -760,12 +760,12 @@ func TestTransportLimitsPendingOutboundRequests(t *testing.T) {
 	outcomes := make(chan requestOutcome, MaxPendingOutboundRequests)
 	for range MaxPendingOutboundRequests {
 		go func() {
-			result, rpcErr, err := p.transport.Request(ctx, "_buzz/wake", nil)
+			result, rpcErr, err := p.transport.Request(ctx, MethodElicitationCreate, nil)
 			outcomes <- requestOutcome{result, rpcErr, err}
 		}()
 	}
 	waitForLines(t, p.output, MaxPendingOutboundRequests+1)
-	if _, _, err := p.transport.Request(context.Background(), "_buzz/wake", nil); !errors.Is(err, ErrOutboundRequestBackpressure) {
+	if _, _, err := p.transport.Request(context.Background(), MethodElicitationCreate, nil); !errors.Is(err, ErrOutboundRequestBackpressure) {
 		t.Fatalf("Request() over limit error = %v, want ErrOutboundRequestBackpressure", err)
 	}
 	cancel()
@@ -776,13 +776,59 @@ func TestTransportLimitsPendingOutboundRequests(t *testing.T) {
 	}
 	freed := make(chan requestOutcome, 1)
 	go func() {
-		result, rpcErr, err := p.transport.Request(context.Background(), "_buzz/wake", nil)
+		result, rpcErr, err := p.transport.Request(context.Background(), MethodElicitationCreate, nil)
 		freed <- requestOutcome{result, rpcErr, err}
 	}()
 	frame := readOutboundFrame(t, p.output, MaxPendingOutboundRequests+1)
 	p.write(t, `{"jsonrpc":"2.0","id":`+string(frame.ID)+`,"result":{}}`+"\n")
 	if outcome := waitOutcome(t, freed); outcome.err != nil {
 		t.Fatalf("Request() after release error = %v", outcome.err)
+	}
+	p.closeAndWait(t)
+}
+
+// Open questions must not block wakes: _buzz/wake requests have their own
+// limit.
+func TestTransportLimitsPendingWakesSeparately(t *testing.T) {
+	t.Parallel()
+
+	p := startPipeTransport(t, Handler{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	total := MaxPendingOutboundRequests + MaxPendingOutboundWakes
+	outcomes := make(chan requestOutcome, total)
+	for range MaxPendingOutboundRequests {
+		go func() {
+			result, rpcErr, err := p.transport.Request(ctx, MethodElicitationCreate, nil)
+			outcomes <- requestOutcome{result, rpcErr, err}
+		}()
+	}
+	waitForLines(t, p.output, MaxPendingOutboundRequests+1)
+	for range MaxPendingOutboundWakes {
+		go func() {
+			result, rpcErr, err := p.transport.Request(ctx, MethodBuzzWake, nil)
+			outcomes <- requestOutcome{result, rpcErr, err}
+		}()
+	}
+	waitForLines(t, p.output, total+1)
+	if _, _, err := p.transport.Request(context.Background(), MethodBuzzWake, nil); !errors.Is(err, ErrOutboundRequestBackpressure) {
+		t.Fatalf("wake over limit error = %v, want ErrOutboundRequestBackpressure", err)
+	}
+	if _, _, err := p.transport.Request(context.Background(), MethodElicitationCreate, nil); !errors.Is(err, ErrOutboundRequestBackpressure) {
+		t.Fatalf("elicitation over limit error = %v, want ErrOutboundRequestBackpressure", err)
+	}
+	wakes := 0
+	for i := 1; i <= total; i++ {
+		if readOutboundFrame(t, p.output, i).Method == MethodBuzzWake {
+			wakes++
+		}
+	}
+	if wakes != MaxPendingOutboundWakes {
+		t.Fatalf("wake frames = %d, want %d", wakes, MaxPendingOutboundWakes)
+	}
+	cancel()
+	for range total {
+		waitOutcome(t, outcomes)
 	}
 	p.closeAndWait(t)
 }

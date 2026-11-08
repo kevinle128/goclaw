@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
@@ -196,10 +197,13 @@ func TestMCPTaskInputAsksAgainOnSchemaFailure(t *testing.T) {
 	}
 }
 
-func TestMCPTaskInputUpdateFailureUndoesAnsweredKey(t *testing.T) {
+func TestMCPTaskInputUpdateFailureRecordsNoAnswer(t *testing.T) {
 	f, tool, row := newTaskToolFixture(t)
 	f.srv.RequireTaskInput("run-1", "approval-gate", approvalForm)
+	var keysAtUpdate atomic.Pointer[[]string]
 	f.srv.Handle(methodTasksUpdate, func(context.Context, mcptest.Request) mcptest.Reply {
+		keys := f.tasks.snapshot(row.ID).AnsweredKeys
+		keysAtUpdate.Store(&keys)
 		return mcptest.ErrorReply(-32603, "busy", nil)
 	})
 	relay := &fakeRelay{canAsk: true, answers: []relayAnswer{{"accept", `{"decision":"approve"}`}}}
@@ -209,6 +213,128 @@ func TestMCPTaskInputUpdateFailureUndoesAnsweredKey(t *testing.T) {
 	}
 	if snap := f.tasks.snapshot(row.ID); len(snap.AnsweredKeys) != 0 {
 		t.Errorf("answered keys after a failed update = %v", snap.AnsweredKeys)
+	}
+	// The answer is recorded only after the server took it.
+	if keys := keysAtUpdate.Load(); keys == nil || len(*keys) != 0 {
+		t.Errorf("answered keys during tasks/update = %v, want none", keys)
+	}
+}
+
+func TestMCPTaskInputRecordsAnswerAfterUpdate(t *testing.T) {
+	f, tool, row := newTaskToolFixture(t)
+	f.srv.RequireTaskInput("run-1", "approval-gate", approvalForm)
+	var keysAtUpdate atomic.Pointer[[]string]
+	f.srv.OnTaskUpdate(func(string, map[string]json.RawMessage) {
+		keys := f.tasks.snapshot(row.ID).AnsweredKeys
+		keysAtUpdate.Store(&keys)
+	})
+	relay := &fakeRelay{canAsk: true, answers: []relayAnswer{{"accept", `{"decision":"approve"}`}}}
+	res := tool.Execute(WithInputRelay(f.ctx(true), relay), map[string]any{"action": "input", "task_id": "run-1"})
+	if res.IsError || res.ForLLM != textAnswerSent {
+		t.Fatalf("input = %q", res.ForLLM)
+	}
+	if keys := keysAtUpdate.Load(); keys == nil || len(*keys) != 0 {
+		t.Errorf("answered keys during tasks/update = %v, want none", keys)
+	}
+	if snap := f.tasks.snapshot(row.ID); !snap.IsAnswered("approval-gate") {
+		t.Errorf("answered keys after the update = %v", snap.AnsweredKeys)
+	}
+}
+
+// barrierRelay answers accept after n callers asked, so their answers come
+// at the same time.
+type barrierRelay struct {
+	mu      sync.Mutex
+	waiting int
+	n       int
+	release chan struct{}
+}
+
+func (r *barrierRelay) CanAskForm() bool { return true }
+
+func (r *barrierRelay) AskForm(ctx context.Context, _, _ string, _ json.RawMessage) (string, json.RawMessage, error) {
+	r.mu.Lock()
+	r.waiting++
+	if r.waiting == r.n {
+		close(r.release)
+	}
+	r.mu.Unlock()
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return "", nil, ctx.Err()
+	}
+	return "accept", json.RawMessage(`{"decision":"approve"}`), nil
+}
+
+func TestMCPTaskInputConcurrentAnswersSendOnce(t *testing.T) {
+	f, tool, row := newTaskToolFixture(t)
+	f.srv.RequireTaskInput("run-1", "approval-gate", approvalForm)
+	relay := &barrierRelay{n: 2, release: make(chan struct{})}
+	results := make(chan string, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			res := tool.Execute(WithInputRelay(f.ctx(true), relay), map[string]any{"action": "input", "task_id": "run-1"})
+			if res.IsError {
+				t.Errorf("input error: %s", res.ForLLM)
+			}
+			results <- res.ForLLM
+		})
+	}
+	wg.Wait()
+	close(results)
+	if n := len(f.srv.TaskUpdates("run-1")); n != 1 {
+		t.Fatalf("tasks/update count = %d, want 1", n)
+	}
+	sent := 0
+	for r := range results {
+		if r == textAnswerSent {
+			sent++
+		}
+	}
+	if sent != 1 {
+		t.Errorf("answers sent = %d, want 1", sent)
+	}
+	if snap := f.tasks.snapshot(row.ID); len(snap.AnsweredKeys) != 1 {
+		t.Errorf("answered keys = %v", snap.AnsweredKeys)
+	}
+}
+
+func TestMCPTaskToolRejectsOtherUser(t *testing.T) {
+	f, tool, row := newTaskToolFixture(t)
+	row.UserID = "user-1"
+	f.tasks.put(row)
+	other := store.WithUserID(f.ctx(true), "user-2")
+	noUser := store.WithAgentID(store.WithTenantID(context.Background(), f.tenantID), f.agentID)
+	for name, ctx := range map[string]context.Context{"other user": other, "no user": noUser} {
+		for _, action := range []string{"status", "input", "cancel"} {
+			res := tool.Execute(ctx, map[string]any{"action": action, "task_id": "run-1"})
+			if !res.IsError || !strings.Contains(res.ForLLM, "not found") {
+				t.Errorf("%s, %s: %q", name, action, res.ForLLM)
+			}
+		}
+	}
+	if n := len(f.srv.Requests()); n != 0 {
+		t.Errorf("server got %d requests for the task of another user", n)
+	}
+	if res := tool.Execute(f.ctx(true), map[string]any{"action": "status", "task_id": "run-1"}); res.IsError {
+		t.Fatalf("owner status = %q", res.ForLLM)
+	}
+}
+
+func TestMCPTaskToolAcceptsRowID(t *testing.T) {
+	f, tool, row := newTaskToolFixture(t)
+	res := tool.Execute(f.ctx(true), map[string]any{"action": "status", "task_id": row.ID.String()})
+	if res.IsError || !strings.Contains(res.ForLLM, "status working") {
+		t.Fatalf("status by row id = %q", res.ForLLM)
+	}
+	if reqs := f.srv.RequestsFor(methodTasksGet); len(reqs) != 1 || reqs[0].Header.Get("Mcp-Name") != "run-1" {
+		t.Fatalf("tasks/get requests = %+v, want the server task id", reqs)
+	}
+	otherAgent := store.WithAgentID(f.ctx(true), uuid.New())
+	if res := tool.Execute(otherAgent, map[string]any{"action": "status", "task_id": row.ID.String()}); !res.IsError || !strings.Contains(res.ForLLM, "not found") {
+		t.Fatalf("row id of another agent = %q", res.ForLLM)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,11 +142,9 @@ func TestInputRelayRejectsAnswerFromOtherConnectionOrGeneration(t *testing.T) {
 	if err := relays.Respond("conn-1", "key-1", 2, "unknown", InputActionCancel, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown request error = %v", err)
 	}
-	if err := relays.Respond("conn-1", "key-1", 2, requestID, "maybe", nil); !errors.Is(err, ErrInputInvalid) {
-		t.Fatalf("bad action error = %v", err)
-	}
-	if err := relays.Respond("conn-1", "key-1", 2, requestID, InputActionAccept, json.RawMessage(`[1]`)); !errors.Is(err, ErrInputInvalid) {
-		t.Fatalf("non-object content error = %v", err)
+	// A bad answer from another connection does not end the request.
+	if err := relays.Respond("conn-2", "key-1", 2, requestID, "maybe", nil); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("bad answer of another connection: error = %v, want %v", err, ErrNotOwner)
 	}
 	if err := relays.Respond("conn-1", "key-1", 2, requestID, InputActionDecline, json.RawMessage(`{"x":1}`)); err != nil {
 		t.Fatal(err)
@@ -153,6 +152,37 @@ func TestInputRelayRejectsAnswerFromOtherConnectionOrGeneration(t *testing.T) {
 	got := waitAsk(t, results)
 	if got.err != nil || got.action != InputActionDecline || got.content != nil {
 		t.Fatalf("AskForm() = %q, %s, %v", got.action, got.content, got.err)
+	}
+}
+
+func TestInputRelayInvalidAnswerCancelsWaiter(t *testing.T) {
+	cases := map[string]struct {
+		action  string
+		content json.RawMessage
+	}{
+		"bad action":         {"maybe", nil},
+		"non-object content": {InputActionAccept, json.RawMessage(`[1]`)},
+		"content too large":  {InputActionAccept, json.RawMessage(`{"note":"` + strings.Repeat("a", MaxInputContentBytes) + `"}`)},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			relays := NewInputRelays()
+			sender := newChanSender()
+			relay := relays.Bind(InputBinding{ConnectionID: "conn-1", SessionKey: "key-1", Generation: 2, Sender: sender, CanAskForm: true})
+			results := startAsk(context.Background(), relay, testSchema)
+			requestID := jsonString(t, sender.next(t)["requestId"])
+
+			if err := relays.Respond("conn-1", "key-1", 2, requestID, c.action, c.content); !errors.Is(err, ErrInputInvalid) {
+				t.Fatalf("error = %v, want %v", err, ErrInputInvalid)
+			}
+			got := waitAsk(t, results)
+			if got.err != nil || got.action != InputActionCancel || got.content != nil {
+				t.Fatalf("AskForm() = %q, %s, %v; want cancel", got.action, got.content, got.err)
+			}
+			if relays.Pending() != 0 {
+				t.Fatalf("pending = %d", relays.Pending())
+			}
+		})
 	}
 }
 

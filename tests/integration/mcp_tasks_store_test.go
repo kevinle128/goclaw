@@ -171,8 +171,12 @@ func TestPGMCPTaskStoreWakes(t *testing.T) {
 		t.Fatalf("ListDueWakes misses the wake: %+v", mine)
 	}
 
-	if err := s.MarkWakeOutcome(ctx, wake.WakeID, store.MCPWakeStateDelivered, time.Now()); err != nil {
-		t.Fatal(err)
+	if changed, err := s.MarkWakeOutcome(ctx, wake.WakeID, store.MCPWakeStateDelivered, time.Now()); err != nil || !changed {
+		t.Fatalf("MarkWakeOutcome = %v, %v; want changed", changed, err)
+	}
+	// A wake that ended stays ended: a late outcome does not change it.
+	if changed, err := s.MarkWakeOutcome(ctx, wake.WakeID, store.MCPWakeStatePending, time.Now()); err != nil || changed {
+		t.Fatalf("MarkWakeOutcome on a delivered wake = %v, %v; want unchanged", changed, err)
 	}
 	stats, err := s.WakeThreadStats(ctx, threadKey, time.Now().Add(-time.Hour))
 	if err != nil || stats.LastDeliveredAt == nil || stats.DeliveredSince != 1 {
@@ -200,6 +204,9 @@ func TestPGMCPTaskStoreWakes(t *testing.T) {
 	}
 	if e := states[pending.WakeID]; e.State != store.MCPWakeStateExpired {
 		t.Errorf("pending wake = %+v, want expired", e)
+	}
+	if changed, err := s.MarkWakeOutcome(ctx, pending.WakeID, store.MCPWakeStateNoSink, time.Now()); err != nil || changed {
+		t.Fatalf("MarkWakeOutcome on an expired wake = %v, %v; want unchanged", changed, err)
 	}
 
 	// Deleting the task row removes its wakes.

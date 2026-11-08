@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -58,7 +60,7 @@ func (t *MCPTaskTool) Parameters() map[string]any {
 			},
 			"task_id": map[string]any{
 				"type":        "string",
-				"description": "The task id from the tool result that started the task",
+				"description": "The task id from the tool result that started the task, or the task id of a task update message",
 			},
 		},
 		"required": []string{"action", "task_id"},
@@ -78,15 +80,21 @@ func (t *MCPTaskTool) Execute(ctx context.Context, args map[string]any) *tools.R
 		return tools.ErrorResult("mcp_task: task_id is required")
 	}
 
-	// The row must belong to the tenant and the agent of this run; any
-	// other row reads as "not found".
+	// The row must belong to the tenant and the agent of this run, and to
+	// the user of this run when the row has a user; any other row reads as
+	// "not found".
 	agentID := store.AgentIDFromContext(ctx)
-	row, err := t.mgr.tasks.GetTaskForAgent(ctx, agentID, taskID)
+	userID := store.UserIDFromContext(ctx)
+	row, err := t.lookup(ctx, agentID, taskID)
 	if err != nil || row == nil {
 		return tools.ErrorResult(fmt.Sprintf("mcp_task: task %q not found", taskID))
 	}
+	if row.UserID != "" && row.UserID != userID {
+		slog.Warn("security.mcp.task_user_mismatch", "task_row", row.ID, "agent", agentID, "action", action)
+		return tools.ErrorResult(fmt.Sprintf("mcp_task: task %q not found", taskID))
+	}
 
-	conn, err := t.mgr.acquire(ctx, row)
+	conn, err := t.mgr.acquire(ctx, row, userID)
 	if err != nil {
 		return tools.ErrorResult(fmt.Sprintf("mcp_task: cannot reach the MCP server of task %q: %v", taskID, err))
 	}
@@ -108,6 +116,25 @@ func (t *MCPTaskTool) Execute(ctx context.Context, args map[string]any) *tools.R
 		return tools.NewResult(tc.statusText(task))
 	}
 	return tc.input(ctx, task)
+}
+
+// lookup finds the row of the agent by server task id, or else by goclaw
+// row id (a wake names the row id when the server task id is not safe to
+// put in a prompt).
+func (t *MCPTaskTool) lookup(ctx context.Context, agentID uuid.UUID, ref string) (*store.MCPTask, error) {
+	row, err := t.mgr.tasks.GetTaskForAgent(ctx, agentID, ref)
+	if err != nil || row != nil {
+		return row, err
+	}
+	id, parseErr := uuid.Parse(ref)
+	if parseErr != nil {
+		return nil, nil
+	}
+	row, err = t.mgr.tasks.GetTask(ctx, id)
+	if err != nil || row == nil || row.AgentID != agentID {
+		return nil, err
+	}
+	return row, nil
 }
 
 // taskCall holds what one mcp_task call needs.
@@ -305,12 +332,23 @@ func (tc *taskCall) askAndSend(ctx context.Context, relay InputRelay, form *form
 	}
 }
 
-// send stores the key as answered, then sends tasks/update. On a failed
-// update the key is removed again.
+// send sends tasks/update, then stores the key as answered. A key is thus
+// recorded only when the server took the answer. The row lock makes the
+// answers of one row go one at a time: a key that another call answered
+// while this one asked is not sent again, and the result is (false, nil).
 func (tc *taskCall) send(ctx context.Context, key string, content json.RawMessage) (bool, *tools.Result) {
-	tasks := tc.tool.mgr.tasks
-	if err := tasks.AddAnsweredKey(ctx, tc.row.ID, key); err != nil {
-		return false, tools.ErrorResult(fmt.Sprintf("mcp_task: cannot record the answer: %v", err))
+	mgr := tc.tool.mgr
+	unlock := mgr.lockRow(tc.row.ID)
+	defer unlock()
+	current, err := mgr.tasks.GetTask(ctx, tc.row.ID)
+	if err != nil {
+		return false, tools.ErrorResult(fmt.Sprintf("mcp_task: cannot read the task: %v; nothing was sent and the run stays paused", err))
+	}
+	if current == nil {
+		return false, tools.ErrorResult(fmt.Sprintf("mcp_task: task %q not found", tc.row.TaskID))
+	}
+	if current.IsAnswered(key) {
+		return false, nil
 	}
 	params := map[string]any{
 		"taskId": tc.row.TaskID,
@@ -319,10 +357,13 @@ func (tc *taskCall) send(ctx context.Context, key string, content json.RawMessag
 		},
 	}
 	if _, err := rawCall(ctx, tc.sess.client, methodTasksUpdate, params, tc.opts()); err != nil {
-		if rmErr := tasks.RemoveAnsweredKey(context.WithoutCancel(ctx), tc.row.ID, key); rmErr != nil {
-			return false, tools.ErrorResult(fmt.Sprintf("mcp_task: tasks/update failed (%v) and the answer record was not undone (%v)", err, rmErr))
-		}
 		return false, tools.ErrorResult(fmt.Sprintf("mcp_task: tasks/update failed: %v; the run stays paused", err))
+	}
+	// The server has the answer now, so a failed record does not undo it.
+	// The watcher can then make one more wake for the key if the server
+	// still lists it.
+	if err := mgr.tasks.AddAnsweredKey(context.WithoutCancel(ctx), tc.row.ID, key); err != nil {
+		slog.Warn("mcp.task.store_failed", "op", "add_answered_key", "task_row", tc.row.ID, "error", err.Error())
 	}
 	tc.row.AnsweredKeys = append(tc.row.AnsweredKeys, key)
 	return true, nil

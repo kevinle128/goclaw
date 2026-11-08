@@ -15,6 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/nextlevelbuilder/goclaw/internal/acpbridge"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
@@ -477,6 +478,18 @@ func TestElicitationAnswerKeepsContentUnchanged(t *testing.T) {
 	}
 	if action, content := elicitationAnswer(json.RawMessage(`{"action":"decline","content":{"x":1}}`)); action != "decline" || content != nil {
 		t.Fatalf("decline = %q %s", action, content)
+	}
+}
+
+func TestElicitationAnswerOverContentLimitIsCancel(t *testing.T) {
+	content := func(size int) string {
+		return `{"note":"` + strings.Repeat("a", size-len(`{"note":""}`)) + `"}`
+	}
+	if action, got := elicitationAnswer(json.RawMessage(`{"action":"accept","content":` + content(acpbridge.MaxInputContentBytes) + `}`)); action != "accept" || len(got) != acpbridge.MaxInputContentBytes {
+		t.Fatalf("answer at the limit = %q (%d bytes), want accept", action, len(got))
+	}
+	if action, got := elicitationAnswer(json.RawMessage(`{"action":"accept","content":` + content(acpbridge.MaxInputContentBytes+1) + `}`)); action != "cancel" || got != nil {
+		t.Fatalf("answer over the limit = %q (%d bytes), want cancel", action, len(got))
 	}
 }
 

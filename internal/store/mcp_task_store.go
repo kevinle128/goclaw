@@ -169,8 +169,10 @@ type MCPTaskStore interface {
 	ListDueWakes(ctx context.Context, now time.Time, limit int) ([]MCPTaskWakeDue, error)
 	// MarkWakeOutcome records one delivery attempt: it sets state and
 	// next_attempt_at, adds one to attempts, and sets delivered_at when the
-	// state is delivered.
-	MarkWakeOutcome(ctx context.Context, wakeID, state string, nextAttemptAt time.Time) error
+	// state is delivered. It changes only a wake in state pending or
+	// no_sink, so a wake that ended in the meantime (for example expired by
+	// the watcher) stays ended. changed tells whether a row was updated.
+	MarkWakeOutcome(ctx context.Context, wakeID, state string, nextAttemptAt time.Time) (changed bool, err error)
 	// WakeThreadStats describes the delivered wakes of a thread.
 	WakeThreadStats(ctx context.Context, threadKey string, since time.Time) (MCPWakeThreadStats, error)
 }

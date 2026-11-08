@@ -49,6 +49,7 @@ func TestWakeSinksNoSinkForOtherTenantAgentOrUser(t *testing.T) {
 		"other tenant": {uuid.New(), agent, "u1"},
 		"other agent":  {tenant, uuid.New(), "u1"},
 		"other user":   {tenant, agent, "u2"},
+		"no user":      {tenant, agent, ""},
 	} {
 		if _, ok := sinks.DeliverWake(context.Background(), target.tenant, target.agent, target.user, "w_1", json.RawMessage(`{}`)); ok {
 			t.Fatalf("%s: a sink was found", name)

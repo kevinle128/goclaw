@@ -79,7 +79,7 @@
     "toolHintsToolValuePlaceholder": "发送给 LLM 的提示内容",
     "toolHintsAdd": "添加提示",
     "protocol": "协议",
-    "protocolHint": "自动：服务器支持时使用 MCP 2026-07-28（tasks 和 events），否则使用旧协议。Legacy：始终使用旧协议。stdio 服务器始终使用旧协议。",
+    "protocolHint": "自动：服务器支持时使用 MCP 2026-07-28（tasks 和 events），否则使用旧协议。Legacy：始终使用旧协议。stdio 和 SSE 服务器始终使用旧协议。",
     "protocolOptions": {
       "auto": "自动",
       "legacy": "Legacy"

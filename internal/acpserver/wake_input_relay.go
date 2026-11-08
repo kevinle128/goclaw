@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/nextlevelbuilder/goclaw/internal/acpbridge"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
@@ -23,8 +24,9 @@ const (
 	WakeRequestTimeout = 30 * time.Second
 	// MaxWakeParamsBytes bounds the params of one _buzz/wake request.
 	MaxWakeParamsBytes = 16 << 10
-	// MaxConcurrentWakes bounds the wakes that wait for the client.
-	MaxConcurrentWakes = 4
+	// MaxConcurrentWakes bounds the wakes that wait for the client. It
+	// matches the transport limit of _buzz/wake requests.
+	MaxConcurrentWakes = MaxPendingOutboundWakes
 	// wakeSubscribeRetryMin and wakeSubscribeRetryMax bound the delay between
 	// subscribe attempts while the Gateway is unavailable.
 	wakeSubscribeRetryMin = time.Second
@@ -239,7 +241,8 @@ func (s *Server) handleInputRequest(ctx context.Context, sessionID string, recor
 }
 
 // elicitationAnswer reads an elicitation result. The content of an accept
-// answer goes back unchanged; a bad result is "cancel".
+// answer goes back unchanged; a bad result, or content over the Gateway
+// limit of an answer, is "cancel".
 func elicitationAnswer(result json.RawMessage) (string, json.RawMessage) {
 	var answer struct {
 		Action  string          `json:"action"`
@@ -250,7 +253,7 @@ func elicitationAnswer(result json.RawMessage) (string, json.RawMessage) {
 	}
 	switch answer.Action {
 	case "accept":
-		if !isJSONObject(answer.Content) {
+		if len(answer.Content) > acpbridge.MaxInputContentBytes || !isJSONObject(answer.Content) {
 			return "cancel", nil
 		}
 		return "accept", bytes.Clone(answer.Content)

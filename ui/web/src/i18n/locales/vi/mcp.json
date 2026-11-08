@@ -79,7 +79,7 @@
     "toolHintsToolValuePlaceholder": "Nội dung gợi ý sẽ gửi cho LLM",
     "toolHintsAdd": "Thêm gợi ý",
     "protocol": "Giao thức",
-    "protocolHint": "Tự động dùng MCP 2026-07-28 (tasks và events) khi server hỗ trợ, nếu không thì dùng giao thức cũ. Legacy luôn dùng giao thức cũ. Server stdio luôn dùng giao thức cũ.",
+    "protocolHint": "Tự động dùng MCP 2026-07-28 (tasks và events) khi server hỗ trợ, nếu không thì dùng giao thức cũ. Legacy luôn dùng giao thức cũ. Server stdio và SSE luôn dùng giao thức cũ.",
     "protocolOptions": {
       "auto": "Tự động",
       "legacy": "Legacy"

@@ -64,7 +64,7 @@ The adapter can send its own JSON-RPC requests to the client, inside or outside 
 These requests use string IDs of the form `goclaw-<n>`, so they never collide with client request IDs.
 The client answers with a normal JSON-RPC response with the same ID.
 A response with an unknown ID, for example a late answer to a cancelled request, is dropped without an error frame.
-At most 8 such requests wait for a response at the same time.
+At most 4 `_buzz/wake` requests and at most 8 other requests (for example `elicitation/create`) wait for a response at the same time. The two limits are separate, so open questions that wait for people do not block wakes.
 When the connection stops, every waiting request fails.
 
 ### Wake delivery
@@ -81,9 +81,10 @@ For each wake the adapter sends this request to the client, inside or outside a 
             "prompt": "[goclaw task update] Archon run run-123 needs approval. ...", "createdAt": "2026-11-08T03:12:01Z"}}
 ```
 
-- `reason` is `input_required`, `pr_ready`, `completed`, `failed` or `cancelled`.
+- `reason` is `input_required`, `pr_ready`, `completed`, `failed` or `cancelled`. A task that the server no longer knows gives `failed`: the Gateway stops watching only when `tasks/get` answers `-32602` for at least 10 minutes and at least 5 calls in a row.
 - `thread` is the `buzz.thread` object of the turn that started the task, unchanged, or `null`.
 - `sessionId` is the ACP session of that turn; it is often gone and is for information only.
+- `task.taskId` is the server task id when it has 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`; else it is the GoClaw task row id. `mcp_task` accepts both.
 - `prompt` is GoClaw text of at most 2 KiB built from stored fields only. No text of the MCP server goes into a wake. The whole frame is at most 16 KiB.
 - A retry or a Gateway restart sends the same `wakeId`.
 
@@ -99,7 +100,8 @@ When the client declares `elicitation.form`, a tool of the turn (for example `mc
 The adapter sends `elicitation/create {sessionId, toolCallId, mode: "form", message, requestedSchema}`, where `toolCallId` is the ID of the tool call in the `tool_call` update of the same turn.
 The request has no deadline beyond the prompt.
 The client returns `{"action": "accept", "content": {...}}`, `decline` or `cancel`. The adapter sends the content back unchanged.
-A client error or a transport error gives `cancel`.
+A client error, a transport error, or content of more than 64 KiB gives `cancel`.
+When the Gateway refuses an answer of the run that asked (bad action, content that is not an object or is more than 64 KiB), the question ends with `cancel`; the task run stays paused.
 
 ### Gateway methods for wakes and input
 
@@ -112,7 +114,7 @@ A client error or a transport error gives `cancel`.
 | `acp.input.request` | event, Gateway → adapter in a prompt | `{sessionKey, acpGeneration, requestId, toolCallId, mode: "form", message, requestedSchema}` |
 | `acp.input.respond` | method, adapter → Gateway | `{sessionKey, acpGeneration, requestId, action, content?}` → `{}` |
 
-A wake sink is bound to the tenant and user of the connection and to the agent; a wake of a task goes only to a connection of the same tenant, agent and user.
+A wake sink is bound to the tenant and user of the connection and to the agent; a wake of a task goes only to a connection of the same tenant, agent and user. A wake of a task without a user goes to no connection.
 With two subscribed connections, the Gateway uses the one that subscribed last.
 An input answer is accepted only from the connection, session key and generation of the run that asked; a second answer is refused.
 An older adapter does not subscribe, so its wakes wait and nothing is sent. An older Gateway refuses `acp.wake.subscribe`; the adapter then tries again only on its next connection.

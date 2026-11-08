@@ -398,4 +398,175 @@ func TestWatcherStopsOnUnknownTask(t *testing.T) {
 	if snap.TerminalAt == nil || snap.Status != TaskStatusWorking {
 		t.Fatalf("row = status %s terminal %v; want terminal_at set and status unchanged", snap.Status, snap.TerminalAt)
 	}
+	if n := countFor(f.srv, methodTasksGet); n < f.mgr.timing.unknownCalls {
+		t.Errorf("tasks/get calls = %d, want at least %d before the row closes", n, f.mgr.timing.unknownCalls)
+	}
+	// The thread learns that the task is gone.
+	ws := f.tasks.wakeList(row.ID)
+	if len(ws) != 1 || ws[0].WakeID != store.MCPWakeID(row.ID, store.MCPWakeReasonFailed, "unknown") ||
+		ws[0].Reason != store.MCPWakeReasonFailed || ws[0].State != store.MCPWakeStatePending {
+		t.Fatalf("wakes = %+v, want one pending failed wake", ws)
+	}
+}
+
+// A server that redeploys can answer -32602 for a short time. The row must
+// stay open until the error repeats for the grace time and the call count.
+func TestWatcherKeepsTaskOnShortUnknownTask(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		grace time.Duration
+		calls int
+	}{
+		{"many calls in a short time", time.Hour, 3},
+		{"long time with few calls", 50 * time.Millisecond, 1000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTaskFixture(t, fixtureOpts{extensions: map[string]any{mcptest.ExtensionTasks: map[string]any{}}})
+			f.mgr.timing.unknownGrace, f.mgr.timing.unknownCalls = tc.grace, tc.calls
+			row := f.openRow("run-1", true, nil)
+			f.mgr.watch(row)
+			eventually(t, 3*time.Second, func() bool { return countFor(f.srv, methodTasksGet) >= 6 }, "no tasks/get retries")
+			time.Sleep(100 * time.Millisecond)
+			if !f.mgr.watching(row.ID) || f.tasks.snapshot(row.ID).TerminalAt != nil {
+				t.Fatal("a short unknown-task error closed the row")
+			}
+
+			// The server knows the task again.
+			f.srv.CreateTask("run-1")
+			f.srv.CompleteTask("run-1", map[string]any{"content": []any{}})
+			eventually(t, 3*time.Second, func() bool { return !f.mgr.watching(row.ID) }, "watcher did not stop")
+			snap := f.tasks.snapshot(row.ID)
+			if snap.Status != TaskStatusCompleted || snap.TerminalAt == nil {
+				t.Fatalf("row = %+v", snap)
+			}
+			if got := wakeReasons(f.tasks.wakeList(row.ID)); !slices.Equal(got, []string{store.MCPWakeReasonCompleted}) {
+				t.Errorf("wakes = %v", got)
+			}
+		})
+	}
+}
+
+// A row with terminal_at is not resumed, so it must not get terminal_at
+// before its terminal wake is stored.
+func TestWatcherRetriesTerminalWakeBeforeTerminalAt(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		taskID string
+		finish func(f *taskFixture)
+		reason string
+		discr  string
+	}{
+		{"completed", "run-1", func(f *taskFixture) { f.srv.CompleteTask("run-1", map[string]any{"content": []any{}}) },
+			store.MCPWakeReasonCompleted, store.MCPWakeReasonCompleted},
+		{"unknown task", "gone", func(*taskFixture) {}, store.MCPWakeReasonFailed, "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTaskFixture(t, fixtureOpts{extensions: map[string]any{mcptest.ExtensionTasks: map[string]any{}}})
+			if tc.taskID != "gone" {
+				f.srv.CreateTask(tc.taskID)
+			}
+			f.tasks.failWakes.Store(true)
+			row := f.openRow(tc.taskID, true, nil)
+			f.mgr.watch(row)
+			tc.finish(f)
+
+			before := countFor(f.srv, methodTasksGet)
+			eventually(t, 3*time.Second, func() bool { return countFor(f.srv, methodTasksGet) >= before+8 }, "no retry of the check")
+			if !f.mgr.watching(row.ID) || f.tasks.snapshot(row.ID).TerminalAt != nil {
+				t.Fatal("terminal_at was set without the terminal wake")
+			}
+
+			f.tasks.failWakes.Store(false)
+			eventually(t, 3*time.Second, func() bool { return !f.mgr.watching(row.ID) }, "watcher did not stop")
+			if f.tasks.snapshot(row.ID).TerminalAt == nil {
+				t.Fatal("terminal_at not set after the wake was stored")
+			}
+			ws := f.tasks.wakeList(row.ID)
+			if len(ws) != 1 || ws[0].WakeID != store.MCPWakeID(row.ID, tc.reason, tc.discr) {
+				t.Fatalf("wakes = %+v", ws)
+			}
+		})
+	}
+}
+
+// hasMore without new events or a new cursor must not make a tight loop.
+func TestWatcherEventsPollAppliesFloorWhenCursorStays(t *testing.T) {
+	f := newTaskFixture(t, fixtureOpts{})
+	f.mgr.timing.eventsPollFloor = 50 * time.Millisecond
+	task := f.srv.CreateTask("run-1")
+	f.srv.Handle(methodEventsStream, func(context.Context, mcptest.Request) mcptest.Reply {
+		return mcptest.ErrorReply(CodeMethodNotFound, "events/stream not supported", nil)
+	})
+	f.srv.Handle(methodEventsPoll, func(context.Context, mcptest.Request) mcptest.Reply {
+		return mcptest.ResultReply(map[string]any{
+			"resultType": "complete", "events": []any{}, "cursor": "c0",
+			"truncated": false, "hasMore": true, "nextPollMs": 0,
+		})
+	})
+	row := f.openRow(task.TaskID, true, new("c0"))
+	f.mgr.watch(row)
+	eventually(t, 3*time.Second, func() bool { return countFor(f.srv, methodEventsPoll) >= 1 }, "no events/poll")
+	start := countFor(f.srv, methodEventsPoll)
+	time.Sleep(300 * time.Millisecond)
+	if n := countFor(f.srv, methodEventsPoll) - start; n > 8 {
+		t.Fatalf("events/poll calls in 300 ms = %d; want the 50 ms floor between calls", n)
+	}
+}
+
+func TestWatcherEventsPollSkipsWaitWhenCursorMoves(t *testing.T) {
+	f := newTaskFixture(t, fixtureOpts{})
+	f.mgr.timing.eventsPollFloor, f.mgr.timing.eventsPollCap = time.Hour, time.Hour
+	task := f.srv.CreateTask("run-1")
+	f.srv.Handle(methodEventsStream, func(context.Context, mcptest.Request) mcptest.Reply {
+		return mcptest.ErrorReply(CodeMethodNotFound, "events/stream not supported", nil)
+	})
+	f.srv.QueuePoll(testEvent, mcptest.PollReply{
+		Events: []mcptest.EventOccurrence{{EventID: "run-1:1", Name: testEvent, Data: map[string]any{}}},
+		Cursor: new("p1"), HasMore: true,
+	})
+	f.srv.QueuePoll(testEvent, mcptest.PollReply{
+		Events: []mcptest.EventOccurrence{{EventID: "run-1:2", Name: testEvent, Data: map[string]any{}}},
+		Cursor: new("p2"),
+	})
+	row := f.openRow(task.TaskID, true, new("c0"))
+	f.mgr.watch(row)
+	eventually(t, 3*time.Second, func() bool { return countFor(f.srv, methodEventsPoll) >= 2 }, "hasMore with a new cursor did not poll again at once")
+}
+
+func TestWatcherEndsWhenServerOrRowIsGone(t *testing.T) {
+	t.Run("server deleted", func(t *testing.T) {
+		f := newTaskFixture(t, fixtureOpts{extensions: map[string]any{mcptest.ExtensionTasks: map[string]any{}}})
+		f.servers.remove(f.serverID)
+		row := f.openRow("run-1", true, nil)
+		f.mgr.watch(row)
+		eventually(t, 3*time.Second, func() bool { return !f.mgr.watching(row.ID) }, "watcher did not stop")
+	})
+	t.Run("server disabled", func(t *testing.T) {
+		f := newTaskFixture(t, fixtureOpts{extensions: map[string]any{mcptest.ExtensionTasks: map[string]any{}}})
+		f.servers.update(f.serverID, func(s *store.MCPServerData) { s.Enabled = false })
+		row := f.openRow("run-1", true, nil)
+		f.mgr.watch(row)
+		eventually(t, 3*time.Second, func() bool { return !f.mgr.watching(row.ID) }, "watcher did not stop")
+		// The row stays open for the next start.
+		snap := f.tasks.snapshot(row.ID)
+		if snap.TerminalAt != nil || snap.Status != TaskStatusWorking {
+			t.Fatalf("row = %+v, want it unchanged", snap)
+		}
+		open, _ := f.tasks.ListOpenTasks(context.Background())
+		if len(open) != 1 || open[0].ID != row.ID {
+			t.Fatalf("open rows = %+v", open)
+		}
+	})
+	t.Run("task row deleted", func(t *testing.T) {
+		f := newTaskFixture(t, fixtureOpts{extensions: map[string]any{mcptest.ExtensionTasks: map[string]any{}}})
+		f.servers.update(f.serverID, func(s *store.MCPServerData) { s.URL = "http://127.0.0.1:1/mcp" })
+		row := f.openRow("run-1", true, nil)
+		f.mgr.watch(row)
+		time.Sleep(100 * time.Millisecond)
+		if !f.mgr.watching(row.ID) {
+			t.Fatal("a connect failure ended the watcher of an existing row")
+		}
+		f.tasks.remove(row.ID)
+		eventually(t, 3*time.Second, func() bool { return !f.mgr.watching(row.ID) }, "watcher did not stop")
+	})
 }

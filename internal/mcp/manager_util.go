@@ -139,11 +139,12 @@ func intSetting(v *float64, def, lo, hi int, name string) int {
 }
 
 // legacyOnly reports whether a connection must skip the server/discover
-// probe. stdio servers are always legacy-only: a stdio server that ignores
-// unknown methods makes each probe wait the full discover timeout (5 s), and
+// probe. Only streamable-http can use MCP 2026-07-28, so stdio and sse
+// servers are always legacy-only. A stdio server that ignores unknown
+// methods also makes each probe wait the full discover timeout (5 s), and
 // the stdio init retry loop can repeat that wait.
 func legacyOnly(transportType string, mode ProtocolMode) bool {
-	return transportType == "stdio" || mode == ProtocolLegacy
+	return transportType != "streamable-http" || mode == ProtocolLegacy
 }
 
 // ConnectOption changes how a pooled connection is made.

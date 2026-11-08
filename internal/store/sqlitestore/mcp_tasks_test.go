@@ -121,7 +121,7 @@ func TestSQLiteMCPTaskStoreWakes(t *testing.T) {
 		t.Fatal(err)
 	}
 	wake := &store.MCPTaskWake{
-		WakeID: store.MCPWakeID(row.ID, store.MCPWakeReasonInputRequired, "approval-gate"),
+		WakeID:    store.MCPWakeID(row.ID, store.MCPWakeReasonInputRequired, "approval-gate"),
 		TaskRowID: row.ID, ThreadKey: "tk", Reason: store.MCPWakeReasonInputRequired,
 	}
 	created, err := s.CreateWake(ctx, wake)
@@ -143,8 +143,12 @@ func TestSQLiteMCPTaskStoreWakes(t *testing.T) {
 	if err != nil || len(due) != 1 || due[0].Task.ID != row.ID || due[0].Wake.State != store.MCPWakeStatePending {
 		t.Fatalf("ListDueWakes = %+v, %v", due, err)
 	}
-	if err := s.MarkWakeOutcome(ctx, wake.WakeID, store.MCPWakeStateDelivered, time.Now()); err != nil {
-		t.Fatal(err)
+	if changed, err := s.MarkWakeOutcome(ctx, wake.WakeID, store.MCPWakeStateDelivered, time.Now()); err != nil || !changed {
+		t.Fatalf("MarkWakeOutcome = %v, %v; want changed", changed, err)
+	}
+	// A wake that ended stays ended: a late outcome does not change it.
+	if changed, err := s.MarkWakeOutcome(ctx, wake.WakeID, store.MCPWakeStatePending, time.Now()); err != nil || changed {
+		t.Fatalf("MarkWakeOutcome on a delivered wake = %v, %v; want unchanged", changed, err)
 	}
 	stats, err := s.WakeThreadStats(ctx, "tk", time.Now().Add(-time.Hour))
 	if err != nil || stats.LastDeliveredAt == nil || stats.DeliveredSince != 1 {
@@ -176,5 +180,11 @@ func TestSQLiteMCPTaskStoreWakes(t *testing.T) {
 	}
 	if wakes[0].Attempts+wakes[1].Attempts != 1 {
 		t.Errorf("attempts = %d + %d, want one attempt in total", wakes[0].Attempts, wakes[1].Attempts)
+	}
+	if changed, err := s.MarkWakeOutcome(ctx, pending.WakeID, store.MCPWakeStateNoSink, time.Now()); err != nil || changed {
+		t.Fatalf("MarkWakeOutcome on an expired wake = %v, %v; want unchanged", changed, err)
+	}
+	if wakes, _ := s.ListWakesForTask(ctx, row.ID); len(wakes) != 2 || wakes[0].State == store.MCPWakeStateNoSink || wakes[1].State == store.MCPWakeStateNoSink {
+		t.Errorf("an expired wake changed state: %+v", wakes)
 	}
 }

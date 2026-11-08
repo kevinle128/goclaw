@@ -6,12 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -27,8 +24,8 @@ const (
 	maxWakeFrameBytes = 16 << 10
 	// wakeFrameOverhead is the size of the JSON-RPC envelope around params.
 	wakeFrameOverhead = 128
-	// maxWakeTaskIDBytes bounds a task id that goes into a wake prompt.
-	maxWakeTaskIDBytes = 256
+	// maxWakeTaskIDBytes bounds a server task id that goes into a wake.
+	maxWakeTaskIDBytes = 128
 )
 
 // WakeDeliverer sends one wake to a live ACP adapter connection of the
@@ -107,8 +104,11 @@ type WakeDispatcher struct {
 	mu       sync.Mutex
 	inFlight map[string]struct{}
 	// failures counts the consecutive failed deliveries of a wake. It is
-	// not stored; after a restart the backoff starts again at 30 s.
-	failures map[string]int
+	// not stored; after a restart the backoff starts again at 30 s. An
+	// entry goes away when the wake ends (delivered, expired, or no longer
+	// pending), or when it had no failure for failuresIdle (the wake ended
+	// outside the dispatcher, for example expired by its watcher).
+	failures map[string]wakeFailures
 	slots    chan struct{}
 
 	ctx     context.Context
@@ -132,7 +132,7 @@ func NewWakeDispatcher(cfg WakeDispatcherConfig) (*WakeDispatcher, error) {
 		now:       time.Now,
 		kick:      make(chan struct{}, 1),
 		inFlight:  make(map[string]struct{}),
-		failures:  make(map[string]int),
+		failures:  make(map[string]wakeFailures),
 		slots:     make(chan struct{}, timing.parallel),
 		ctx:       ctx,
 		cancel:    cancel,
@@ -325,23 +325,48 @@ func (d *WakeDispatcher) deliver(item store.MCPTaskWakeDue) {
 	}
 }
 
+// mark records the outcome of one attempt. A wake that is no longer
+// pending or no_sink (it ended in the meantime) is not changed.
 func (d *WakeDispatcher) mark(ctx context.Context, log *slog.Logger, wake store.MCPTaskWake, state string, next time.Time) {
 	if state == store.MCPWakeStateExpired || state == store.MCPWakeStateDelivered {
 		d.clearFailures(wake.WakeID)
 	}
-	if err := d.tasks.MarkWakeOutcome(ctx, wake.WakeID, state, next); err != nil && ctx.Err() == nil {
-		log.Warn("mcp.wake.store_failed", "op", "mark_outcome", "state", state, "error", err.Error())
+	changed, err := d.tasks.MarkWakeOutcome(ctx, wake.WakeID, state, next)
+	switch {
+	case err != nil:
+		if ctx.Err() == nil {
+			log.Warn("mcp.wake.store_failed", "op", "mark_outcome", "state", state, "error", err.Error())
+		}
+	case !changed:
+		d.clearFailures(wake.WakeID)
+		log.Info("mcp.wake.ended_meanwhile", "state", state)
 	}
 }
 
+// wakeFailures is the failure count of one wake and the time of the last
+// failure.
+type wakeFailures struct {
+	count int
+	last  time.Time
+}
+
 // failedDelay counts one more failed delivery of the wake and returns its
-// backoff delay.
+// backoff delay. It also removes the entries of wakes without a failure for
+// failuresIdle: a wake in backoff is tried again at least once per last
+// backoff step, so such a wake is no longer due.
 func (d *WakeDispatcher) failedDelay(wakeID string) time.Duration {
+	now := d.now()
+	steps := d.timing.failedBackoff
+	idle := 2 * steps[len(steps)-1]
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	n := d.failures[wakeID]
-	d.failures[wakeID] = n + 1
-	steps := d.timing.failedBackoff
+	for id, e := range d.failures {
+		if now.Sub(e.last) > idle {
+			delete(d.failures, id)
+		}
+	}
+	n := d.failures[wakeID].count
+	d.failures[wakeID] = wakeFailures{count: n + 1, last: now}
 	return steps[min(n, len(steps)-1)]
 }
 
@@ -378,10 +403,8 @@ type wakeTask struct {
 // result) goes into a wake.
 func (d *WakeDispatcher) buildParams(ctx context.Context, item store.MCPTaskWakeDue) (json.RawMessage, error) {
 	wake, task := item.Wake, item.Task
-	if !safeWakeTaskID(task.TaskID) {
-		return nil, fmt.Errorf("%w: task id is empty, too long or has unsafe characters", errWakeUnbuildable)
-	}
-	prompt, ok := wakePrompt(wake.Reason, task.TaskID)
+	taskRef := wakeTaskRef(task)
+	prompt, ok := wakePrompt(wake.Reason, taskRef)
 	if !ok {
 		return nil, fmt.Errorf("%w: unknown reason %q", errWakeUnbuildable, wake.Reason)
 	}
@@ -403,7 +426,7 @@ func (d *WakeDispatcher) buildParams(ctx context.Context, item store.MCPTaskWake
 		SessionID: task.ACPSessionID,
 		Task: wakeTask{
 			Server:        srv.Name,
-			TaskID:        task.TaskID,
+			TaskID:        taskRef,
 			Status:        wakeTaskStatus(task.Status),
 			LastUpdatedAt: task.UpdatedAt.UTC().Format(time.RFC3339),
 		},
@@ -419,8 +442,8 @@ func (d *WakeDispatcher) buildParams(ctx context.Context, item store.MCPTaskWake
 	return params, nil
 }
 
-// wakePrompt returns the English prompt of a wake reason. The task id is
-// checked by safeWakeTaskID.
+// wakePrompt returns the English prompt of a wake reason. taskID comes from
+// wakeTaskRef.
 func wakePrompt(reason, taskID string) (string, bool) {
 	const prefix = "[goclaw task update] Archon run "
 	var prompt string
@@ -443,16 +466,31 @@ func wakePrompt(reason, taskID string) (string, bool) {
 	return prompt, true
 }
 
-// safeWakeTaskID accepts a task id that is safe to put in a prompt: valid
-// UTF-8, at most 256 bytes, no control characters, white space, quotes,
-// back quotes or back slashes.
+// wakeTaskRef returns the task reference of a wake: the server task id when
+// it is safe to put in a prompt, else the goclaw row id. mcp_task accepts
+// both.
+func wakeTaskRef(task store.MCPTask) string {
+	if safeWakeTaskID(task.TaskID) {
+		return task.TaskID
+	}
+	return task.ID.String()
+}
+
+// safeWakeTaskID accepts a task id that is safe to put in a prompt: 1 to
+// 128 bytes of A-Z, a-z, 0-9, '.', '_', ':' and '-'.
 func safeWakeTaskID(id string) bool {
-	if id == "" || len(id) > maxWakeTaskIDBytes || !utf8.ValidString(id) {
+	if id == "" || len(id) > maxWakeTaskIDBytes {
 		return false
 	}
-	return !strings.ContainsFunc(id, func(r rune) bool {
-		return unicode.IsControl(r) || unicode.IsSpace(r) || r == '"' || r == '\\' || r == '`'
-	})
+	for i := 0; i < len(id); i++ {
+		switch c := id[i]; {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '.', c == '_', c == ':', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // wakeTaskStatus returns a known task status, or "unknown" for any other

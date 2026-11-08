@@ -51,7 +51,7 @@ type Transport struct {
 	// keyed by their "goclaw-<n>" id.
 	outboundMu     sync.Mutex
 	outboundNext   uint64
-	outbound       map[string]chan outboundResponse
+	outbound       map[string]outboundRequest
 	outboundClosed bool
 
 	sendMu    sync.RWMutex
@@ -72,6 +72,13 @@ type connectionState struct {
 type outboundResponse struct {
 	result json.RawMessage
 	rpcErr *RPCError
+}
+
+// outboundRequest is one request to the client that waits for a response.
+// wake marks a _buzz/wake request, which has its own limit.
+type outboundRequest struct {
+	responses chan outboundResponse
+	wake      bool
 }
 
 type outboundRequestEnvelope struct {
@@ -113,7 +120,7 @@ func NewTransport(input io.Reader, output io.Writer, handler Handler, agentVersi
 			sessions: make(map[string]struct{}),
 		},
 		requestSlots: make(chan struct{}, MaxPendingRequests),
-		outbound:     make(map[string]chan outboundResponse),
+		outbound:     make(map[string]outboundRequest),
 	}
 }
 
@@ -241,7 +248,7 @@ func (t *Transport) Request(ctx context.Context, method string, params any) (jso
 	if method == "" {
 		return nil, nil, errors.New("ACP request method is required")
 	}
-	id, responses, err := t.registerOutbound()
+	id, responses, err := t.registerOutbound(method == MethodBuzzWake)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -268,20 +275,32 @@ func (t *Transport) ClientCapabilities() ClientCapabilities {
 	return t.state.clientCapabilities
 }
 
-func (t *Transport) registerOutbound() (string, chan outboundResponse, error) {
+// registerOutbound adds a waiting request. Wakes and other requests are
+// counted against separate limits.
+func (t *Transport) registerOutbound(wake bool) (string, chan outboundResponse, error) {
 	t.outboundMu.Lock()
 	defer t.outboundMu.Unlock()
 	if t.outboundClosed {
 		return "", nil, ErrTransportClosed
 	}
-	if len(t.outbound) >= MaxPendingOutboundRequests {
+	limit := MaxPendingOutboundRequests
+	if wake {
+		limit = MaxPendingOutboundWakes
+	}
+	same := 0
+	for _, pending := range t.outbound {
+		if pending.wake == wake {
+			same++
+		}
+	}
+	if same >= limit {
 		return "", nil, ErrOutboundRequestBackpressure
 	}
 	t.outboundNext++
 	id := "goclaw-" + strconv.FormatUint(t.outboundNext, 10)
 	// One buffered slot: the read loop never blocks on delivery.
 	responses := make(chan outboundResponse, 1)
-	t.outbound[id] = responses
+	t.outbound[id] = outboundRequest{responses: responses, wake: wake}
 	return id, responses, nil
 }
 
@@ -295,8 +314,8 @@ func (t *Transport) closeOutbound() {
 	t.outboundMu.Lock()
 	defer t.outboundMu.Unlock()
 	t.outboundClosed = true
-	for id, responses := range t.outbound {
-		close(responses)
+	for id, pending := range t.outbound {
+		close(pending.responses)
 		delete(t.outbound, id)
 	}
 }
@@ -319,7 +338,7 @@ func (t *Transport) deliverResponse(fields map[string]json.RawMessage) {
 		return
 	}
 	t.outboundMu.Lock()
-	responses, ok := t.outbound[id]
+	pending, ok := t.outbound[id]
 	delete(t.outbound, id)
 	t.outboundMu.Unlock()
 	if !ok {
@@ -340,7 +359,7 @@ func (t *Transport) deliverResponse(fields map[string]json.RawMessage) {
 			response.rpcErr = &RPCError{Code: *wire.Code, Message: wire.Message}
 		}
 	}
-	responses <- response
+	pending.responses <- response
 }
 
 func (t *Transport) dispatch(ctx context.Context, line []byte) error {

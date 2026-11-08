@@ -487,16 +487,9 @@ func (m *Manager) maybeRegisterTaskTool(ctx context.Context, agentID uuid.UUID, 
 }
 
 // serverMayStartTasks reports whether a server can return tasks: an enabled
-// streamable-http or sse server whose protocol setting is not legacy.
+// server that may use MCP 2026-07-28 (streamable-http, protocol not legacy).
 func serverMayStartTasks(srv store.MCPServerData) bool {
-	if !srv.Enabled {
-		return false
-	}
-	switch srv.Transport {
-	case "streamable-http", "sse":
-		return ParseProtocolMode(srv.Settings) != ProtocolLegacy
-	}
-	return false
+	return srv.Enabled && !legacyOnly(srv.Transport, ParseProtocolMode(srv.Settings))
 }
 
 // maybeEnterSearchMode partially defers MCP tools when total count exceeds

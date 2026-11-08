@@ -90,12 +90,10 @@ func (r *InputRelays) Bind(binding InputBinding) *InputRelay {
 // Respond gives the answer to the waiting request. It returns ErrNotFound
 // for an unknown or already answered request, ErrNotOwner when the answer
 // comes from another connection, session key or generation, and
-// ErrInputInvalid for a bad action or content.
+// ErrInputInvalid for a bad action or content. A bad answer from the owner
+// ends the request with "cancel", so the waiter does not wait for an answer
+// that does not come.
 func (r *InputRelays) Respond(connectionID, sessionKey string, generation uint64, requestID, action string, content json.RawMessage) error {
-	answer, err := normalizeInputAnswer(action, content)
-	if err != nil {
-		return err
-	}
 	r.mu.Lock()
 	p, ok := r.pending[requestID]
 	if !ok {
@@ -108,6 +106,11 @@ func (r *InputRelays) Respond(connectionID, sessionKey string, generation uint64
 	}
 	delete(r.pending, requestID)
 	r.mu.Unlock()
+	answer, err := normalizeInputAnswer(action, content)
+	if err != nil {
+		p.result <- inputResult{action: InputActionCancel}
+		return err
+	}
 	p.result <- answer
 	return nil
 }

@@ -2,18 +2,24 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/mark3labs/mcp-go/client/transport"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/nextlevelbuilder/goclaw/internal/mcp/mcptest"
 )
@@ -130,6 +136,72 @@ func TestDiscoverToolsStdioNeverProbesDiscover(t *testing.T) {
 	}
 	if methods := readMethods(t, logPath); slices.Contains(methods, "server/discover") {
 		t.Errorf("DiscoverTools sent server/discover on stdio: %v", methods)
+	}
+}
+
+// sseMethodLog is an SSE MCP server (mcp-go) that records the method of
+// every message the client posts.
+type sseMethodLog struct {
+	mu      sync.Mutex
+	methods []string
+}
+
+func (l *sseMethodLog) record(method string) {
+	l.mu.Lock()
+	l.methods = append(l.methods, method)
+	l.mu.Unlock()
+}
+
+func (l *sseMethodLog) list() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.methods)
+}
+
+func startSSEServer(t *testing.T) (*httptest.Server, *sseMethodLog) {
+	t.Helper()
+	log := &sseMethodLog{}
+	sse := mcpserver.NewSSEServer(mcpserver.NewMCPServer("sse-fake", "1", mcpserver.WithToolCapabilities(false)))
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			var msg struct {
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(body, &msg) == nil && msg.Method != "" {
+				log.record(msg.Method)
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		sse.ServeHTTP(w, r)
+	}))
+	mcpserver.WithBaseURL(ts.URL)(sse)
+	t.Cleanup(ts.Close)
+	return ts, log
+}
+
+// The modern protocol runs on streamable HTTP only, so an SSE server gets
+// the initialize handshake at once and no server/discover probe.
+func TestSSEServersNeverProbeDiscover(t *testing.T) {
+	ts, log := startSSEServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	ss, _, err := connectAndDiscover(ctx, "sse-fake", "sse", "", nil, nil, ts.URL+"/sse", nil, 5, ProtocolAuto)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer ss.client.Close()
+
+	methods := log.list()
+	if len(methods) == 0 || methods[0] != "initialize" {
+		t.Fatalf("first method = %v, want initialize", methods)
+	}
+	if slices.Contains(methods, "server/discover") {
+		t.Errorf("SSE connection sent server/discover: %v", methods)
+	}
+	if ss.era() != EraLegacy || ss.client.ProtocolVersion() != mcpgo.LATEST_LEGACY_PROTOCOL_VERSION {
+		t.Errorf("era = %v, version = %q; want legacy 2025-11-25", ss.era(), ss.client.ProtocolVersion())
 	}
 }
 

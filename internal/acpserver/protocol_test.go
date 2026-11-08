@@ -22,6 +22,7 @@ func TestProtocolLimits(t *testing.T) {
 		"MCP entries":      MaxMCPEntries,
 		"Gateway request":  MaxGatewayFrameBytes,
 		"outbound pending": MaxPendingOutboundRequests,
+		"outbound wakes":   MaxPendingOutboundWakes,
 		"thread context":   MaxThreadContextBytes,
 	}
 	want := map[string]int{
@@ -37,6 +38,7 @@ func TestProtocolLimits(t *testing.T) {
 		"MCP entries":      128,
 		"Gateway request":  480 << 10,
 		"outbound pending": 8,
+		"outbound wakes":   4,
 		"thread context":   4 << 10,
 	}
 	for name, got := range checks {

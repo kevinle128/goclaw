@@ -29,6 +29,12 @@ type watchTiming struct {
 	streamFailures   int
 	streamRetryAfter time.Duration
 	acquireTimeout   time.Duration
+	// unknownGrace and unknownCalls bound a -32602 from tasks/get: the row
+	// closes only when the error repeats for at least unknownGrace and at
+	// least unknownCalls calls in a row. A server can answer -32602 for a
+	// short time after a redeploy, and the task must not be lost.
+	unknownGrace time.Duration
+	unknownCalls int
 }
 
 func defaultWatchTiming() watchTiming {
@@ -43,11 +49,17 @@ func defaultWatchTiming() watchTiming {
 		streamFailures:   3,
 		streamRetryAfter: 60 * time.Second,
 		acquireTimeout:   60 * time.Second,
+		unknownGrace:     10 * time.Minute,
+		unknownCalls:     5,
 	}
 }
 
 // dedupWindow is how many recent eventIds a watcher remembers.
 const dedupWindow = 256
+
+// errWakeNotStored means a wake that must go in before a row change could
+// not be stored. The watcher keeps the row as it is and checks again later.
+var errWakeNotStored = errors.New("mcp task wake not stored")
 
 // watchMode is how a watcher learns about changes of its task.
 type watchMode int
@@ -117,6 +129,11 @@ type taskWatcher struct {
 	pollUntil     time.Time
 	streamOff     bool // the server has no events/stream; events/poll only
 	eventsOff     bool // no events for this task; tasks/get only
+
+	// unknownSince and unknownCount describe the -32602 answers of
+	// tasks/get in a row (zero after a good answer).
+	unknownSince time.Time
+	unknownCount int
 }
 
 func (w *taskWatcher) log() *slog.Logger {
@@ -135,6 +152,9 @@ func (w *taskWatcher) run() {
 			return
 		}
 		if err := w.ensureConn(); err != nil {
+			if w.cannotContinue(err) {
+				return
+			}
 			w.log().Warn("mcp.task.watch_connect_failed", "error", err.Error())
 			if !w.sleep(w.nextBackoff()) {
 				w.finish()
@@ -172,6 +192,27 @@ func (w *taskWatcher) run() {
 			}
 		}
 	}
+}
+
+// cannotContinue reports whether a connect failure ends the watcher: the
+// server record or the task row is gone (deleted), or the server is
+// disabled. A disabled server leaves the row open, so the next gateway start
+// resumes it.
+func (w *taskWatcher) cannotContinue(err error) bool {
+	switch {
+	case errors.Is(err, errServerGone):
+		w.log().Info("mcp.task.server_gone", "next", "stop watching")
+		return true
+	case errors.Is(err, errServerDisabled):
+		w.log().Info("mcp.task.server_disabled", "next", "stop watching until the next start")
+		return true
+	}
+	row, getErr := w.mgr.tasks.GetTask(w.baseCtx, w.row.ID)
+	if getErr == nil && row == nil {
+		w.log().Info("mcp.task.row_gone", "next", "stop watching")
+		return true
+	}
+	return false
 }
 
 // finish handles the end of the run context: at expiry the open wakes of
@@ -281,8 +322,10 @@ func (w *taskWatcher) runStream(sess *connSession) watchOutcome {
 			w.log().Warn("mcp.task.stream_silent", "silence", silence.String())
 			return w.streamFailed(gotFrame)
 		case <-safety.C:
-			if done, _ := w.truth(sess); done {
+			if done, err := w.truth(sess); done {
 				return outcomeDone
+			} else if errors.Is(err, errWakeNotStored) {
+				return outcomeRetry
 			}
 		}
 	}
@@ -295,15 +338,19 @@ func (w *taskWatcher) handleFrame(sess *connSession, f streamFrame) (out watchOu
 		w.persistCursor(f.Cursor)
 		// The first active frame confirms a (re)connect; a later one with
 		// truncated=true reports a gap. Both need the truth.
-		if done, _ := w.truth(sess); done {
+		if done, err := w.truth(sess); done {
 			return outcomeDone, true
+		} else if errors.Is(err, errWakeNotStored) {
+			return outcomeRetry, true
 		}
 	case frameHeartbeat:
 		w.persistCursor(f.Cursor)
 	case frameEvent:
 		w.persistCursor(f.Cursor)
-		if done := w.onEvents(sess, []EventOccurrence{*f.Event}); done {
+		if done, err := w.onEvents(sess, []EventOccurrence{*f.Event}); done {
 			return outcomeDone, true
+		} else if errors.Is(err, errWakeNotStored) {
+			return outcomeRetry, true
 		}
 	case frameError:
 		if f.Error != nil {
@@ -385,13 +432,19 @@ func (w *taskWatcher) runEventsPoll(sess *connSession) watchOutcome {
 			return w.connectionProblem(err)
 		}
 		w.backoff = 0
+		before := w.row.EventCursor
 		w.persistCursor(res.Cursor)
-		if done := w.onEvents(sess, res.Events); done {
+		cursorMoved := !sameString(before, w.row.EventCursor)
+		if done, err := w.onEvents(sess, res.Events); done {
 			return outcomeDone
+		} else if errors.Is(err, errWakeNotStored) {
+			return w.connectionProblem(err)
 		}
 		if res.Truncated || !time.Now().Before(nextSafety) {
-			if done, _ := w.truth(sess); done {
+			if done, err := w.truth(sess); done {
 				return outcomeDone
+			} else if errors.Is(err, errWakeNotStored) {
+				return w.connectionProblem(err)
 			}
 			nextSafety = time.Now().Add(w.safetyPoll())
 		}
@@ -399,7 +452,10 @@ func (w *taskWatcher) runEventsPoll(sess *connSession) watchOutcome {
 			return outcomeSwitch
 		}
 		wait := clampDuration(time.Duration(res.NextPollMs)*time.Millisecond, w.timing.eventsPollFloor, w.timing.eventsPollCap)
-		if res.HasMore {
+		// More events wait: poll again at once, but only when this page
+		// moved on. hasMore with no events or the same cursor would else
+		// make a tight loop.
+		if res.HasMore && len(res.Events) > 0 && cursorMoved {
 			wait = 0
 		}
 		if !w.sleep(wait) {
@@ -431,6 +487,10 @@ func (w *taskWatcher) connectionProblem(err error) watchOutcome {
 	if w.runCtx.Err() != nil {
 		return outcomeDone
 	}
+	if errors.Is(err, errWakeNotStored) {
+		// A store problem: the connection is good, try the check again.
+		return outcomeRetry
+	}
 	w.log().Info("mcp.task.request_failed", "error", err.Error())
 	if !isRPCError(err) {
 		w.reacquire = true
@@ -440,8 +500,8 @@ func (w *taskWatcher) connectionProblem(err error) watchOutcome {
 
 // onEvents applies new events: one tasks/get for the batch, then the
 // pr_ready check against the refreshed status. Event data never sets the
-// status. It reports whether the task ended.
-func (w *taskWatcher) onEvents(sess *connSession, events []EventOccurrence) bool {
+// status. It reports whether the task ended, and the error of the tasks/get.
+func (w *taskWatcher) onEvents(sess *connSession, events []EventOccurrence) (bool, error) {
 	fresh := make([]EventOccurrence, 0, len(events))
 	for i := range events {
 		if events[i].EventID != "" && w.dedup.firstSeen(events[i].EventID) {
@@ -449,14 +509,14 @@ func (w *taskWatcher) onEvents(sess *connSession, events []EventOccurrence) bool
 		}
 	}
 	if len(fresh) == 0 {
-		return false
+		return false, nil
 	}
 	done, err := w.truth(sess)
 	if done || err != nil {
-		return done
+		return done, err
 	}
 	if w.row.PRWoken || w.row.Status != TaskStatusWorking {
-		return false
+		return false, nil
 	}
 	for i := range fresh {
 		if eventPRURL(&fresh[i]) {
@@ -464,7 +524,7 @@ func (w *taskWatcher) onEvents(sess *connSession, events []EventOccurrence) bool
 			break
 		}
 	}
-	return false
+	return false, nil
 }
 
 // prReady records the pr_ready wake once.
@@ -486,6 +546,8 @@ func (w *taskWatcher) prReady() {
 
 // truth reads the task with tasks/get and applies it. It reports whether the
 // watcher must stop (terminal status or a task the server no longer knows).
+// errWakeNotStored means the row did not change because its wake could not
+// be stored; the caller checks again later.
 func (w *taskWatcher) truth(sess *connSession) (bool, error) {
 	raw, err := rawCall(w.runCtx, sess.client, methodTasksGet, map[string]any{"taskId": w.row.TaskID}, w.taskOpts())
 	if err != nil {
@@ -493,8 +555,7 @@ func (w *taskWatcher) truth(sess *connSession) (bool, error) {
 			return true, nil
 		}
 		if errors.Is(err, ErrInvalidParams) {
-			w.unknownTask()
-			return true, nil
+			return w.unknownTask(err)
 		}
 		return false, err
 	}
@@ -502,28 +563,51 @@ func (w *taskWatcher) truth(sess *connSession) (bool, error) {
 	if err := json.Unmarshal(raw, &task); err != nil || task.Status == "" {
 		return false, fmt.Errorf("mcp tasks/get: invalid result")
 	}
-	return w.apply(task), nil
+	w.unknownSince, w.unknownCount = time.Time{}, 0
+	return w.apply(task)
 }
 
-// unknownTask ends the watch of a task that the server no longer knows. The
-// status stays as it was; the open wakes expire.
-func (w *taskWatcher) unknownTask() {
-	w.log().Warn("mcp.task.unknown_on_server", "next", "stop watching")
+// unknownTask handles a -32602 from tasks/get. The row closes only when the
+// error repeats for unknownGrace and unknownCalls calls in a row; until then
+// err goes back to the caller, which tries again after a backoff. To close,
+// the open wakes expire, a "failed" wake tells the thread that the task is
+// gone, and then terminal_at is set. The status stays as it was.
+func (w *taskWatcher) unknownTask(err error) (bool, error) {
+	now := time.Now()
+	if w.unknownCount == 0 {
+		w.unknownSince = now
+	}
+	w.unknownCount++
+	if w.unknownCount < w.timing.unknownCalls || now.Sub(w.unknownSince) < w.timing.unknownGrace {
+		w.log().Info("mcp.task.unknown_on_server", "calls", w.unknownCount,
+			"since", w.unknownSince.UTC().Format(time.RFC3339), "next", "try again")
+		return false, err
+	}
+	w.log().Warn("mcp.task.unknown_on_server", "calls", w.unknownCount,
+		"since", w.unknownSince.UTC().Format(time.RFC3339), "next", "stop watching")
 	if _, err := w.mgr.tasks.ExpireWakesForTask(w.baseCtx, w.row.ID); err != nil {
 		w.log().Warn("mcp.task.store_failed", "op", "expire_wakes", "error", err.Error())
+	}
+	// The wake goes in before terminal_at: a row with terminal_at is not
+	// resumed at the next start.
+	if !w.wake(store.MCPWakeReasonFailed, "unknown") {
+		return false, errWakeNotStored
 	}
 	if err := w.mgr.tasks.MarkTaskTerminal(w.baseCtx, w.row.ID); err != nil {
 		w.log().Warn("mcp.task.store_failed", "op", "mark_terminal", "error", err.Error())
 	}
+	return true, nil
 }
 
 // apply stores the truth of one tasks/get and records its wakes. It reports
-// whether the task is terminal.
-func (w *taskWatcher) apply(task DetailedTask) bool {
+// whether the task is terminal. When the terminal wake cannot be stored,
+// terminal_at stays unset and the error is errWakeNotStored.
+func (w *taskWatcher) apply(task DetailedTask) (bool, error) {
 	if task.PollIntervalMs != nil && *task.PollIntervalMs > 0 {
 		w.pollInterval = clampDuration(time.Duration(*task.PollIntervalMs)*time.Millisecond, w.timing.minPoll, w.timing.maxPoll)
 	}
 	terminal := isTerminalStatus(task.Status)
+	var wakeErr error
 
 	switch {
 	case task.Status == TaskStatusInputRequired:
@@ -531,7 +615,9 @@ func (w *taskWatcher) apply(task DetailedTask) bool {
 	case terminal:
 		// The wake goes in before terminal_at: a row with terminal_at is
 		// not resumed at the next start.
-		w.wake(task.Status, task.Status)
+		if !w.wake(task.Status, task.Status) {
+			terminal, wakeErr = false, errWakeNotStored
+		}
 	}
 
 	var msg *string
@@ -555,7 +641,7 @@ func (w *taskWatcher) apply(task DetailedTask) bool {
 	if terminal {
 		w.log().Info("mcp.task.ended", "status", task.Status)
 	}
-	return terminal
+	return terminal, wakeErr
 }
 
 // inputWakes records one input_required wake per input request key that is
@@ -569,7 +655,11 @@ func (w *taskWatcher) inputWakes(task DetailedTask) {
 		w.wake(store.MCPWakeReasonInputRequired, "status:"+task.LastUpdatedAt)
 		return
 	}
-	// answered_keys changes in mcp_task input, so read the row again.
+	// answered_keys changes in mcp_task input, so read the row again. The
+	// row lock keeps this read and the wakes apart from an answer that is
+	// on its way (tasks/update sent, key not recorded yet).
+	unlock := w.mgr.lockRow(w.row.ID)
+	defer unlock()
 	row, err := w.mgr.tasks.GetTask(w.baseCtx, w.row.ID)
 	if err != nil || row == nil {
 		w.log().Warn("mcp.task.store_failed", "op", "get_task", "error", fmt.Sprint(err))
@@ -631,7 +721,7 @@ func (w *taskWatcher) ensureConn() error {
 	}
 	w.releaseConn()
 	w.reacquire = false
-	conn, err := w.mgr.acquire(w.baseCtx, &w.row)
+	conn, err := w.mgr.acquire(w.baseCtx, &w.row, w.row.UserID)
 	if err != nil {
 		return err
 	}

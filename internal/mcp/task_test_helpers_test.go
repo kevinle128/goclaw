@@ -2,11 +2,13 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +27,8 @@ type memTaskStore struct {
 	cursors []string // every stored cursor, in order
 	// clock, when set, gives delivered_at (default time.Now).
 	clock func() time.Time
+	// failWakes makes CreateWake fail while it is true.
+	failWakes atomic.Bool
 }
 
 func newMemTaskStore() *memTaskStore {
@@ -208,7 +212,12 @@ func (s *memTaskStore) MarkTaskTerminal(ctx context.Context, id uuid.UUID) error
 	})
 }
 
+var errWakeStoreDown = errors.New("wake store down")
+
 func (s *memTaskStore) CreateWake(ctx context.Context, w *store.MCPTaskWake) (bool, error) {
+	if s.failWakes.Load() {
+		return false, errWakeStoreDown
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, err := s.row(ctx, w.TaskRowID)
@@ -290,16 +299,16 @@ func (s *memTaskStore) ListDueWakes(_ context.Context, now time.Time, limit int)
 
 // MarkWakeOutcome records one attempt in the tenant of ctx. delivered_at
 // comes from the clock of the store.
-func (s *memTaskStore) MarkWakeOutcome(ctx context.Context, wakeID, state string, next time.Time) error {
+func (s *memTaskStore) MarkWakeOutcome(ctx context.Context, wakeID, state string, next time.Time) (bool, error) {
 	tid, err := memTenant(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	w, ok := s.wakes[wakeID]
-	if !ok || w.TenantID != tid {
-		return nil
+	if !ok || w.TenantID != tid || (w.State != store.MCPWakeStatePending && w.State != store.MCPWakeStateNoSink) {
+		return false, nil
 	}
 	w.State = state
 	w.NextAttemptAt = next
@@ -308,7 +317,7 @@ func (s *memTaskStore) MarkWakeOutcome(ctx context.Context, wakeID, state string
 		at := s.clockNow()
 		w.DeliveredAt = &at
 	}
-	return nil
+	return true, nil
 }
 
 // WakeThreadStats describes the delivered wakes of a thread in the tenant
@@ -383,7 +392,8 @@ func (s *memTaskStore) cursorHistory() []string {
 	return slices.Clone(s.cursors)
 }
 
-// fakeServerStore returns server records by id, in their tenant only.
+// fakeServerStore returns server records by id, in their tenant only. A
+// missing record gives sql.ErrNoRows, like the SQL stores.
 type fakeServerStore struct {
 	mockMCPStore
 	mu      sync.Mutex
@@ -396,9 +406,37 @@ func (f *fakeServerStore) GetServer(ctx context.Context, id uuid.UUID) (*store.M
 	defer f.mu.Unlock()
 	srv, ok := f.servers[id]
 	if !ok || f.tenants[id] != store.TenantIDFromContext(ctx) {
-		return nil, errors.New("server not found")
+		return nil, sql.ErrNoRows
 	}
 	return &srv, nil
+}
+
+// update changes the record of a server.
+func (f *fakeServerStore) update(id uuid.UUID, fn func(*store.MCPServerData)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	srv := f.servers[id]
+	fn(&srv)
+	f.servers[id] = srv
+}
+
+// remove deletes the record of a server.
+func (f *fakeServerStore) remove(id uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.servers, id)
+}
+
+// remove deletes a task row and its wakes, as a cascade delete does.
+func (s *memTaskStore) remove(id uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.rows, id)
+	for k, w := range s.wakes {
+		if w.TaskRowID == id {
+			delete(s.wakes, k)
+		}
+	}
 }
 
 const testEvent = "workflow_run.status_changed"
@@ -461,6 +499,7 @@ func (f *taskFixture) newManager() *TaskWatchManager {
 		eventsPollFloor: 10 * time.Millisecond, eventsPollCap: 50 * time.Millisecond,
 		backoffBase: 10 * time.Millisecond, backoffMax: 50 * time.Millisecond,
 		streamFailures: 3, streamRetryAfter: time.Hour, acquireTimeout: 5 * time.Second,
+		unknownGrace: 100 * time.Millisecond, unknownCalls: 5,
 	}
 	f.t.Cleanup(mgr.Stop)
 	return mgr

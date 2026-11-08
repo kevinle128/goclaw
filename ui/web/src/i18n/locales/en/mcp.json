@@ -79,7 +79,7 @@
     "toolHintsToolValuePlaceholder": "Hint text shown to the LLM",
     "toolHintsAdd": "Add hint",
     "protocol": "Protocol",
-    "protocolHint": "Auto uses MCP 2026-07-28 (tasks and events) when the server supports it, else the older protocol. Legacy always uses the older protocol. stdio servers always use the older protocol.",
+    "protocolHint": "Auto uses MCP 2026-07-28 (tasks and events) when the server supports it, else the older protocol. Legacy always uses the older protocol. stdio and SSE servers always use the older protocol.",
     "protocolOptions": {
       "auto": "Auto",
       "legacy": "Legacy"

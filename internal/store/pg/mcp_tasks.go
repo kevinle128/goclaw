@@ -333,6 +333,8 @@ func (s *PGMCPTaskStore) ExpireWakesForTask(ctx context.Context, taskRowID uuid.
 }
 
 // ListDueWakes returns due wakes of all tenants with their task rows (system read).
+// The states are literals in the SQL text (not parameters) so that the
+// partial index idx_mcp_task_wakes_due matches also under a generic plan.
 func (s *PGMCPTaskStore) ListDueWakes(ctx context.Context, now time.Time, limit int) ([]store.MCPTaskWakeDue, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -340,9 +342,9 @@ func (s *PGMCPTaskStore) ListDueWakes(ctx context.Context, now time.Time, limit 
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+mcpWakeSelectCols+`, `+mcpTaskSelectCols+`
 		 FROM mcp_task_wakes w JOIN mcp_tasks t ON t.id = w.task_row_id AND t.tenant_id = w.tenant_id
-		 WHERE w.state IN ($1, $2) AND w.next_attempt_at <= $3
-		 ORDER BY w.next_attempt_at, w.created_at LIMIT $4`,
-		store.MCPWakeStatePending, store.MCPWakeStateNoSink, now.UTC(), limit)
+		 WHERE w.state IN ('pending', 'no_sink') AND w.next_attempt_at <= $1
+		 ORDER BY w.next_attempt_at, w.created_at LIMIT $2`,
+		now.UTC(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -368,18 +370,23 @@ func (s *PGMCPTaskStore) ListDueWakes(ctx context.Context, now time.Time, limit 
 	return out, rows.Err()
 }
 
-// MarkWakeOutcome records one delivery attempt.
-func (s *PGMCPTaskStore) MarkWakeOutcome(ctx context.Context, wakeID, state string, nextAttemptAt time.Time) error {
+// MarkWakeOutcome records one delivery attempt of a wake that is still
+// pending or no_sink.
+func (s *PGMCPTaskStore) MarkWakeOutcome(ctx context.Context, wakeID, state string, nextAttemptAt time.Time) (bool, error) {
 	tid, err := requireTenantID(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = s.db.ExecContext(ctx,
+	res, err := s.db.ExecContext(ctx,
 		`UPDATE mcp_task_wakes SET state = $1, next_attempt_at = $2, attempts = attempts + 1,
 		 delivered_at = CASE WHEN $1 = $3 THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END
-		 WHERE wake_id = $4 AND tenant_id = $5`,
+		 WHERE wake_id = $4 AND tenant_id = $5 AND state IN ('pending', 'no_sink')`,
 		state, nextAttemptAt.UTC(), store.MCPWakeStateDelivered, wakeID, tid)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // WakeThreadStats describes the delivered wakes of a thread.

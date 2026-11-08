@@ -213,7 +213,7 @@ func TestMCPTaskRegisteredWithoutConnection(t *testing.T) {
 		want       bool
 	}{
 		{"streamable http auto", []store.MCPAccessInfo{server("streamable-http", `{}`, true)}, false, true},
-		{"sse", []store.MCPAccessInfo{server("sse", `{"protocol":"auto"}`, true)}, false, true},
+		{"sse", []store.MCPAccessInfo{server("sse", `{"protocol":"auto"}`, true)}, false, false},
 		{"legacy setting", []store.MCPAccessInfo{server("streamable-http", `{"protocol":"legacy"}`, true)}, false, false},
 		{"stdio", []store.MCPAccessInfo{server("stdio", `{}`, true)}, false, false},
 		{"disabled", []store.MCPAccessInfo{server("streamable-http", `{}`, false)}, false, false},
