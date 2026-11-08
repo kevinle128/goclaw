@@ -515,7 +515,7 @@ Current adopters: `exec`, `web_search`, `web_fetch`, `tts`, `create_image`, `rea
 
 ## 10. MCP Integration
 
-GoClaw integrates with Model Context Protocol (MCP) servers. The MCP Manager connects to external tool servers and registers their tools in the tool registry with a configurable prefix (e.g. `mcp_servername_toolname`).
+GoClaw integrates with Model Context Protocol (MCP) servers. The MCP Manager connects to external tool servers and registers their tools in the tool registry with a configurable prefix. The registered name is `<prefix>__<tool>`: an empty prefix becomes `mcp_<server name with - as _>`, and a prefix without `mcp_` gets it (server `archon-mcp`, tool `run_workflow` → `mcp_archon_mcp__run_workflow`; see `ensureMCPPrefix` in [bridge_tool.go](../internal/mcp/bridge_tool.go)).
 
 **Transports:**
 
@@ -551,6 +551,32 @@ flowchart TD
 | User grant | `mcp_user_grants` | Per server + user; `tool_allow`, `tool_deny` JSONB arrays |
 
 **Access request workflow:** Users request server access → admins approve/reject → on approval a grant is created transactionally.
+
+### MCP 2026-07-28: tasks and events
+
+**Protocol era.** For `sse` and `streamable-http` servers, goclaw sends `server/discover` first and uses MCP 2026-07-28 when the server supports it; else it uses the `initialize` handshake (2025-11-25). `stdio` servers always use 2025-11-25. The server setting `protocol` controls this: `"auto"` (default) or `"legacy"` (never send `server/discover`).
+
+**Tasks.** On a 2026-07-28 connection, a long-running tool (for example Archon `run_workflow`) can return a task instead of a result. The agent gets the task id at once. A task watcher in the gateway follows the task until it ends (event stream, event poll, or `tasks/get`) and records a wake when the task needs input or ends. The built-in tool `mcp_task` works with a started task: `action` `status` (read the status, result, or error), `input` (show the task's open question in the conversation and send the answer), `cancel` (ask the server to cancel). Wake delivery to ACP clients is in [25-acp-server.md](./25-acp-server.md).
+
+**Events.** The server setting `task_events` binds a server event (events extension) to the tasks that the server's tools start:
+
+| Key | Required | Value |
+|---|---|---|
+| `event` | yes | Event name for `events/poll` and `events/stream`, 1-128 characters |
+| `task_argument` | yes | Subscription argument that takes the task id, 1-64 characters |
+| `bootstrap_arguments` | no | JSON object (max 1 KiB) for the `events/poll` sent before `tools/call`, to get the start cursor |
+| `heartbeat_sec` | no | Expected heartbeat interval, 5-300, default 30 |
+| `safety_poll_sec` | no | Interval of the safety `tasks/get`, 30-3600, default 300 |
+
+```json
+{"protocol": "auto",
+ "task_events": {"event": "workflow_run.status_changed", "task_argument": "run_id",
+                 "bootstrap_arguments": {"workflow": "my-workflow"}}}
+```
+
+Server create and update (`POST`/`PUT /v1/mcp/servers`) reject bad `protocol` or `task_events` values with HTTP 400 ([settings_validate.go](../internal/mcp/settings_validate.go)). Other settings keys (for example `tool_hints`) are not changed. The web UI MCP server form edits `protocol`, `event`, `task_argument` and `bootstrap_arguments`; set `heartbeat_sec` and `safety_poll_sec` through the API (the form keeps them).
+
+**Tool policy.** The grant `tool_allow` / `tool_deny` use the original MCP tool names. The agent tool policy (`tools_config`: `profile`, `allow`, `alsoAllow`) uses the registered names. When an agent has a restrictive profile or an `allow` list, add the registered names (for example `mcp_archon_mcp__run_workflow`) and `mcp_task` to `allow` or `alsoAllow`, or the policy removes them.
 
 ---
 

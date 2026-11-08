@@ -160,6 +160,10 @@ func (h *MCPHandler) handleCreateServer(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if err := mcp.ValidateServerSettings(srv.Settings); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidRequest, err.Error())})
+		return
+	}
 
 	userID := store.UserIDFromContext(r.Context())
 	if userID != "" {
@@ -217,6 +221,18 @@ func (h *MCPHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request) 
 
 	// Allowlist: only permit known MCP server columns.
 	updates = filterAllowedKeys(updates, mcpServerAllowedFields)
+
+	// The update replaces the whole settings object, so check it as a whole.
+	if settings, ok := updates["settings"]; ok {
+		raw, err := json.Marshal(settings)
+		if err == nil {
+			err = mcp.ValidateServerSettings(raw)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidRequest, err.Error())})
+			return
+		}
+	}
 
 	// Security validation: validate updated fields
 	// For updates, we need to consider the existing server + updated fields

@@ -16,6 +16,14 @@ import { isValidSlug } from "@/lib/slug";
 import { mcpFormSchema, type MCPFormData } from "@/schemas/mcp.schema";
 import { McpConnectionFields } from "./mcp-connection-fields";
 import { McpSettingsFields } from "./mcp-settings-fields";
+import {
+  EMPTY_TASK_SETTINGS,
+  applyTaskSettings,
+  hasTaskEvents,
+  readTaskSettings,
+  validateTaskSettings,
+  type McpTaskSettingsForm,
+} from "./mcp-task-settings";
 
 /** Split a string into shell-like tokens, treating commas and spaces outside quotes as delimiters. */
 function splitShellTokens(input: string): string[] {
@@ -49,6 +57,10 @@ export function MCPFormDialog({ open, onOpenChange, server, onSubmit, onTest }: 
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; tool_count?: number; error?: string } | null>(null);
   const [error, setError] = useState("");
+  // protocol and task_events are kept out of the react-hook-form schema; they
+  // are read from and written back to the server settings object.
+  const [taskSettings, setTaskSettings] = useState<McpTaskSettingsForm>(EMPTY_TASK_SETTINGS);
+  const [taskEventsOpen, setTaskEventsOpen] = useState(false);
 
   const form = useForm<MCPFormData>({
     resolver: zodResolver(mcpFormSchema),
@@ -98,6 +110,9 @@ export function MCPFormDialog({ open, onOpenChange, server, onSubmit, onTest }: 
         toolHintsGlobal: server?.settings?.tool_hints?.global ?? "",
         toolHintsTools: server?.settings?.tool_hints?.tools ?? {},
       });
+      const initialTaskSettings = readTaskSettings(server?.settings);
+      setTaskSettings(initialTaskSettings);
+      setTaskEventsOpen(hasTaskEvents(initialTaskSettings));
       setError("");
       setTestResult(null);
     }
@@ -149,12 +164,19 @@ export function MCPFormDialog({ open, onOpenChange, server, onSubmit, onTest }: 
     if (!isValidSlug(data.name.trim())) { setError(t("form.errors.nameSlug")); return; }
     if (isStdio && !data.command.trim()) { setError(t("form.errors.commandRequired")); return; }
     if (!isStdio && !data.url.trim()) { setError(t("form.errors.urlRequired")); return; }
+    const taskSettingsError = validateTaskSettings(taskSettings);
+    if (taskSettingsError) {
+      setTaskEventsOpen(true);
+      setError(t(taskSettingsError.key, taskSettingsError.values));
+      return;
+    }
 
     setLoading(true);
     setError("");
     try {
-      // Build settings payload: include tool_hints only when at least one field
-      // is populated, so servers without hints keep a clean settings object.
+      // Build settings payload from the existing settings so that keys this
+      // form does not edit stay. Include tool_hints only when at least one
+      // field is populated, so servers without hints keep a clean object.
       const trimmedGlobal = data.toolHintsGlobal.trim();
       const trimmedTools: Record<string, string> = {};
       for (const [k, v] of Object.entries(data.toolHintsTools)) {
@@ -163,15 +185,19 @@ export function MCPFormDialog({ open, onOpenChange, server, onSubmit, onTest }: 
         if (key && val) trimmedTools[key] = val;
       }
       const hasHints = trimmedGlobal !== "" || Object.keys(trimmedTools).length > 0;
-      const settings: NonNullable<MCPServerInput["settings"]> = {
+      const base: Record<string, unknown> = {
+        ...(server?.settings ?? {}),
         require_user_credentials: data.requireUserCreds,
       };
       if (hasHints) {
-        settings.tool_hints = {
+        base.tool_hints = {
           ...(trimmedGlobal ? { global: trimmedGlobal } : {}),
           ...(Object.keys(trimmedTools).length > 0 ? { tools: trimmedTools } : {}),
         };
+      } else {
+        delete base.tool_hints;
       }
+      const settings = applyTaskSettings(base, taskSettings) as NonNullable<MCPServerInput["settings"]>;
 
       await onSubmit({
         name: data.name.trim(),
@@ -199,7 +225,13 @@ export function MCPFormDialog({ open, onOpenChange, server, onSubmit, onTest }: 
 
         <div className="grid gap-4 py-2 -mx-4 px-4 sm:-mx-6 sm:px-6 overflow-y-auto min-h-0">
           <McpConnectionFields form={form} />
-          <McpSettingsFields form={form} />
+          <McpSettingsFields
+            form={form}
+            taskSettings={taskSettings}
+            onTaskSettingsChange={setTaskSettings}
+            taskEventsOpen={taskEventsOpen}
+            onTaskEventsOpenChange={setTaskEventsOpen}
+          />
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
 

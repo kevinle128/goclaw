@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 )
 
 // ProtocolMode is the per-server setting "protocol" in mcp_servers.settings.
@@ -79,8 +80,8 @@ type TaskEventsBinding struct {
 // ParseTaskEvents reads the "task_events" field from an MCP server's
 // Settings JSONB. It returns nil when the field is absent or not usable:
 // event and task_argument must be non-empty strings within their length
-// limits. bootstrap_arguments that is not a JSON object of at most 1 KiB
-// becomes {}. A number out of its range takes its default. Safe to call with
+// limits (in characters). bootstrap_arguments that is not a JSON object of
+// at most 1 KiB (compact size) becomes {}. A number out of its range takes its default. Safe to call with
 // nil.
 func ParseTaskEvents(settings json.RawMessage) *TaskEventsBinding {
 	if len(settings) == 0 {
@@ -101,7 +102,7 @@ func ParseTaskEvents(settings json.RawMessage) *TaskEventsBinding {
 	te := s.TaskEvents
 	event := strings.TrimSpace(te.Event)
 	arg := strings.TrimSpace(te.TaskArgument)
-	if event == "" || arg == "" || len(event) > taskEventsMaxEventLen || len(arg) > taskEventsMaxArgumentLen {
+	if event == "" || arg == "" || utf8.RuneCountInString(event) > taskEventsMaxEventLen || utf8.RuneCountInString(arg) > taskEventsMaxArgumentLen {
 		slog.Warn("mcp.settings.task_events_invalid", "reason", "event or task_argument empty or too long")
 		return nil
 	}
@@ -114,7 +115,7 @@ func ParseTaskEvents(settings json.RawMessage) *TaskEventsBinding {
 	}
 	if raw := te.BootstrapArguments; len(raw) > 0 && string(raw) != "null" {
 		var obj map[string]any
-		if len(raw) <= taskEventsMaxBootstrapBytes && json.Unmarshal(raw, &obj) == nil && obj != nil {
+		if compactLen(raw) <= taskEventsMaxBootstrapBytes && json.Unmarshal(raw, &obj) == nil && obj != nil {
 			b.BootstrapArguments = append(json.RawMessage(nil), raw...)
 		} else {
 			slog.Warn("mcp.settings.task_events_invalid", "reason", "bootstrap_arguments is not a JSON object of at most 1 KiB")

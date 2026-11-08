@@ -121,6 +121,13 @@ func (h *MCPHandler) doMCPImport(ctx context.Context, r io.Reader, userID string
 			summary.ServersSkipped++
 			continue
 		}
+		// Imported settings get the same check as create and update, so a bad
+		// task_events binding cannot reach the task watcher.
+		if err := mcp.ValidateServerSettings(srv.Settings); err != nil {
+			slog.Warn("mcp.import: invalid settings", "name", srv.Name, "reason", err.Error())
+			summary.ServersSkipped++
+			continue
+		}
 
 		id, created, err := pg.ImportMCPServer(ctx, h.db, srv, userID)
 		if err != nil {

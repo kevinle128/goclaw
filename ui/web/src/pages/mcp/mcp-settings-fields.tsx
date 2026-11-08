@@ -4,8 +4,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { KeyValueEditor } from "@/components/shared/key-value-editor";
 import type { MCPFormData } from "@/schemas/mcp.schema";
+import {
+  MCP_PROTOCOL_MODES,
+  TASK_ARGUMENT_MAX_CHARS,
+  TASK_EVENT_MAX_CHARS,
+  validateBootstrapArguments,
+  type McpProtocolMode,
+  type McpTaskSettingsForm,
+} from "./mcp-task-settings";
 
 /** Env var keys whose values should be masked in the form. */
 const SENSITIVE_ENV_RE = /^.*(key|secret|token|password|credential).*$/i;
@@ -13,11 +22,27 @@ export const isSensitiveEnv = (key: string) => SENSITIVE_ENV_RE.test(key.trim())
 
 interface McpSettingsFieldsProps {
   form: UseFormReturn<MCPFormData>;
+  taskSettings: McpTaskSettingsForm;
+  onTaskSettingsChange: (value: McpTaskSettingsForm) => void;
+  taskEventsOpen: boolean;
+  onTaskEventsOpenChange: (open: boolean) => void;
 }
 
-/** Renders env vars, tool prefix, timeout, enabled, and requireUserCredentials fields. */
-export function McpSettingsFields({ form }: McpSettingsFieldsProps) {
+/**
+ * Renders env vars, tool hints, tool prefix, timeout, protocol, task events,
+ * enabled, and requireUserCredentials fields.
+ */
+export function McpSettingsFields({
+  form,
+  taskSettings,
+  onTaskSettingsChange,
+  taskEventsOpen,
+  onTaskEventsOpenChange,
+}: McpSettingsFieldsProps) {
   const { t } = useTranslation("mcp");
+  const updateTaskSettings = (patch: Partial<McpTaskSettingsForm>) =>
+    onTaskSettingsChange({ ...taskSettings, ...patch });
+  const bootstrapError = validateBootstrapArguments(taskSettings.bootstrapArguments);
   const { watch, setValue } = form;
   const env = watch("env") as Record<string, string>;
   const toolPrefix = watch("toolPrefix");
@@ -109,6 +134,88 @@ export function McpSettingsFields({ form }: McpSettingsFieldsProps) {
           min={1}
         />
       </div>
+
+      <div className="grid gap-1.5">
+        <Label htmlFor="mcp-protocol">{t("form.protocol")}</Label>
+        <Select
+          value={taskSettings.protocol}
+          onValueChange={(v) => updateTaskSettings({ protocol: v as McpProtocolMode })}
+        >
+          <SelectTrigger id="mcp-protocol" className="w-full text-base md:text-sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {MCP_PROTOCOL_MODES.map((mode) => (
+              <SelectItem key={mode} value={mode}>
+                {t(`form.protocolOptions.${mode}`)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">{t("form.protocolHint")}</p>
+      </div>
+
+      {/* Binds a server event (events extension) to the tasks that its tools
+          start, so goclaw follows a task by events. See Settings.task_events JSONB. */}
+      <details
+        open={taskEventsOpen}
+        onToggle={(e) => onTaskEventsOpenChange(e.currentTarget.open)}
+        className="rounded-md border border-dashed border-border p-3"
+      >
+        <summary className="cursor-pointer text-sm font-medium">{t("form.taskEvents")}</summary>
+        <div className="mt-3 grid gap-3">
+          <p className="text-xs text-muted-foreground">{t("form.taskEventsHint")}</p>
+
+          <div className="grid gap-1.5">
+            <Label htmlFor="mcp-task-event" className="text-xs text-muted-foreground">
+              {t("form.taskEvent")}
+            </Label>
+            <Input
+              id="mcp-task-event"
+              value={taskSettings.event}
+              onChange={(e) => updateTaskSettings({ event: e.target.value })}
+              placeholder={t("form.taskEventPlaceholder")}
+              maxLength={TASK_EVENT_MAX_CHARS}
+              className="font-mono text-base md:text-sm"
+            />
+          </div>
+
+          <div className="grid gap-1.5">
+            <Label htmlFor="mcp-task-argument" className="text-xs text-muted-foreground">
+              {t("form.taskArgument")}
+            </Label>
+            <Input
+              id="mcp-task-argument"
+              value={taskSettings.taskArgument}
+              onChange={(e) => updateTaskSettings({ taskArgument: e.target.value })}
+              placeholder={t("form.taskArgumentPlaceholder")}
+              maxLength={TASK_ARGUMENT_MAX_CHARS}
+              className="font-mono text-base md:text-sm"
+            />
+            <p className="text-xs text-muted-foreground">{t("form.taskArgumentHint")}</p>
+          </div>
+
+          <div className="grid gap-1.5">
+            <Label htmlFor="mcp-task-bootstrap" className="text-xs text-muted-foreground">
+              {t("form.bootstrapArguments")}
+            </Label>
+            <Textarea
+              id="mcp-task-bootstrap"
+              value={taskSettings.bootstrapArguments}
+              onChange={(e) => updateTaskSettings({ bootstrapArguments: e.target.value })}
+              placeholder={t("form.bootstrapArgumentsPlaceholder")}
+              rows={3}
+              aria-invalid={bootstrapError ? true : undefined}
+              className="font-mono text-base md:text-sm resize-y"
+            />
+            {bootstrapError ? (
+              <p className="text-xs text-destructive">{t(bootstrapError.key, bootstrapError.values)}</p>
+            ) : (
+              <p className="text-xs text-muted-foreground">{t("form.bootstrapArgumentsHint")}</p>
+            )}
+          </div>
+        </div>
+      </details>
 
       <div className="flex items-center gap-2">
         <Switch
