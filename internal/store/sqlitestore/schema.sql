@@ -2313,3 +2313,44 @@ CREATE TABLE IF NOT EXISTS skill_versions (
     UNIQUE(skill_id, version)
 );
 CREATE INDEX IF NOT EXISTS idx_skill_versions_tenant_skill ON skill_versions(tenant_id, skill_id, version DESC);
+
+-- Table: mcp_tasks, mcp_task_wakes (migration 000081)
+CREATE TABLE IF NOT EXISTS mcp_tasks (
+    id             TEXT NOT NULL PRIMARY KEY,
+    tenant_id      TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    agent_id       TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    server_id      TEXT NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+    task_id        TEXT NOT NULL,
+    session_key    TEXT NOT NULL DEFAULT '',
+    acp_session_id TEXT NOT NULL DEFAULT '',
+    user_id        TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL,
+    status_message TEXT,
+    event_cursor   TEXT,
+    request_caps   TEXT NOT NULL DEFAULT '{}',
+    thread_context TEXT,
+    answered_keys  TEXT NOT NULL DEFAULT '[]',
+    pr_woken       BOOLEAN NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    terminal_at    TEXT,
+    expires_at     TEXT NOT NULL,
+    UNIQUE (tenant_id, server_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_tasks_open ON mcp_tasks (expires_at) WHERE terminal_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_mcp_tasks_tenant_agent ON mcp_tasks (tenant_id, agent_id, task_id);
+CREATE TABLE IF NOT EXISTS mcp_task_wakes (
+    wake_id         TEXT NOT NULL PRIMARY KEY,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    task_row_id     TEXT NOT NULL REFERENCES mcp_tasks(id) ON DELETE CASCADE,
+    thread_key      TEXT NOT NULL,
+    reason          TEXT NOT NULL,
+    state           TEXT NOT NULL DEFAULT 'pending',
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    delivered_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_task_wakes_due ON mcp_task_wakes (next_attempt_at) WHERE state IN ('pending', 'no_sink');
+CREATE INDEX IF NOT EXISTS idx_mcp_task_wakes_task ON mcp_task_wakes (task_row_id);
+CREATE INDEX IF NOT EXISTS idx_mcp_task_wakes_thread ON mcp_task_wakes (tenant_id, thread_key, delivered_at);

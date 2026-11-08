@@ -57,6 +57,33 @@ type Pool struct {
 	cfg         PoolConfig
 	slot        chan struct{} // semaphore for MaxSize
 	stopCh      chan struct{}
+
+	// taskWatch is the gateway's task watch manager. The pool carries it
+	// because the pool is the one MCP runtime handle that every agent
+	// loop and MCP manager already has.
+	taskWatch atomic.Pointer[TaskWatchManager]
+}
+
+// SetTaskWatch attaches the task watch manager. MCP managers and per-user
+// tools that use this pool then send started tasks to it and register the
+// mcp_task tool.
+func (p *Pool) SetTaskWatch(m *TaskWatchManager) { p.taskWatch.Store(m) }
+
+// TaskWatch returns the attached task watch manager, or nil.
+func (p *Pool) TaskWatch() *TaskWatchManager {
+	if p == nil {
+		return nil
+	}
+	return p.taskWatch.Load()
+}
+
+// TaskStarter returns the attached task watch manager as a TaskStarter, or
+// nil (a nil interface, not a typed nil).
+func (p *Pool) TaskStarter() TaskStarter {
+	if m := p.TaskWatch(); m != nil {
+		return m
+	}
+	return nil
 }
 
 // NewPool creates a shared MCP connection pool with idle eviction.
@@ -123,8 +150,9 @@ func (p *Pool) Acquire(ctx context.Context, tenantID uuid.UUID, name, transportT
 	if entry, ok := p.servers[key]; ok && entry.state.connected.Load() {
 		entry.refCount++
 		entry.lastUsed = time.Now()
+		refs := entry.refCount // read under the lock
 		p.mu.Unlock()
-		slog.Debug("mcp.pool.reuse", "key", key, "refCount", entry.refCount)
+		slog.Debug("mcp.pool.reuse", "key", key, "refCount", refs)
 		return entry, nil
 	}
 
@@ -210,8 +238,9 @@ func (p *Pool) AcquireUser(ctx context.Context, tenantID uuid.UUID, name, userID
 	if entry, ok := p.userServers[key]; ok && entry.state.connected.Load() {
 		entry.refCount++
 		entry.lastUsed = time.Now()
+		refs := entry.refCount // read under the lock
 		p.mu.Unlock()
-		slog.Debug("mcp.pool.user.reuse", "key", key, "refCount", entry.refCount)
+		slog.Debug("mcp.pool.user.reuse", "key", key, "refCount", refs)
 		return entry, nil
 	}
 

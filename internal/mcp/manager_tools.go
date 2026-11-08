@@ -101,6 +101,11 @@ func (m *Manager) unregisterAllTools() {
 		m.searchMode = false
 	}
 
+	if m.taskToolRegistered {
+		m.registry.Unregister(mcpTaskToolName)
+		m.taskToolRegistered = false
+	}
+
 	m.servers = make(map[string]*serverState)
 	m.poolServers = nil
 	m.poolToolNames = nil

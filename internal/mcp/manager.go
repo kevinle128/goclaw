@@ -153,8 +153,21 @@ type Manager struct {
 	userCredServers []store.MCPAccessInfo
 
 	// taskStarter receives tasks that modern tools/call requests start
-	// (nil = report the task id and status as the tool result).
+	// (nil = the task watch manager of the pool, if any).
 	taskStarter TaskStarter
+
+	// taskToolRegistered is true while this Manager has the mcp_task tool
+	// in its registry.
+	taskToolRegistered bool
+}
+
+// starter returns the TaskStarter for new BridgeTools: the one set with
+// WithTaskStarter, else the task watch manager of the pool, else nil.
+func (m *Manager) starter() TaskStarter {
+	if m.taskStarter != nil {
+		return m.taskStarter
+	}
+	return m.pool.TaskStarter()
 }
 
 // ManagerOption configures the Manager.
@@ -234,7 +247,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		// Config-path servers have no DB-backed Settings, so no tool hints.
 		// Also no grant-based tool filtering (allow/deny are nil) — config
 		// trust model is that the operator gates which servers are enabled.
-		if err := m.connectServer(ctx, name, cfg.Transport, cfg.Command, cfg.Args, cfg.Env, cfg.URL, headers, cfg.ToolPrefix, cfg.TimeoutSec, uuid.Nil, ToolHints{}, nil, nil, ProtocolAuto); err != nil {
+		if err := m.connectServer(ctx, name, cfg.Transport, cfg.Command, cfg.Args, cfg.Env, cfg.URL, headers, cfg.ToolPrefix, cfg.TimeoutSec, uuid.Nil, ToolHints{}, nil, nil, ProtocolAuto, nil); err != nil {
 			slog.Warn("mcp.server.connect_failed", "server", name, "error", err)
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
 		}
@@ -258,13 +271,21 @@ type resolvedServer struct {
 // resolveServerCredentials merges server defaults with per-user credentials.
 // Returns nil if the server should be skipped (disabled or missing required creds).
 func (m *Manager) resolveServerCredentials(ctx context.Context, info store.MCPAccessInfo, userID string) *resolvedServer {
+	return resolveCredentials(ctx, m.store, info, userID)
+}
+
+// resolveCredentials merges the server defaults, the channel context
+// credentials of ctx, and the per-user credentials of userID from st.
+// Returns nil if the server should be skipped (disabled or missing required
+// creds). st may be nil (no context or user credentials).
+func resolveCredentials(ctx context.Context, st store.MCPServerStore, info store.MCPAccessInfo, userID string) *resolvedServer {
 	srv := info.Server
 	if !srv.Enabled {
 		return nil
 	}
 
 	var contextCreds *store.MCPContextCredentials
-	if contextStore, ok := m.store.(store.MCPContextAdminStore); ok {
+	if contextStore, ok := st.(store.MCPContextAdminStore); ok {
 		for _, scope := range store.ChannelContextScopeChainFromContext(ctx) {
 			if creds, _ := contextStore.GetContextCredentialsForScope(ctx, scope, srv.ID); creds != nil {
 				contextCreds = creds
@@ -277,7 +298,7 @@ func (m *Manager) resolveServerCredentials(ctx context.Context, info store.MCPAc
 		if userID == "" {
 			return nil
 		}
-		uc, _ := m.store.GetUserCredentials(ctx, srv.ID, userID)
+		uc, _ := st.GetUserCredentials(ctx, srv.ID, userID)
 		hasContextCreds := contextCreds != nil && (contextCreds.APIKey != "" || len(contextCreds.Headers) > 0 || len(contextCreds.Env) > 0)
 		if !hasContextCreds && (uc == nil || (uc.APIKey == "" && len(uc.Headers) == 0 && len(uc.Env) == 0)) {
 			slog.Debug("mcp.skip_no_user_credentials", "server", srv.Name, "user", userID)
@@ -323,8 +344,8 @@ func (m *Manager) resolveServerCredentials(ctx context.Context, info store.MCPAc
 	}
 
 	// Merge per-user credentials (user overrides server defaults)
-	if userID != "" && m.store != nil {
-		if userCreds, err := m.store.GetUserCredentials(ctx, srv.ID, userID); err == nil && userCreds != nil {
+	if userID != "" && st != nil {
+		if userCreds, err := st.GetUserCredentials(ctx, srv.ID, userID); err == nil && userCreds != nil {
 			if userCreds.APIKey != "" {
 				if headers == nil {
 					headers = make(map[string]string)
@@ -349,8 +370,8 @@ func (m *Manager) resolveServerCredentials(ctx context.Context, info store.MCPAc
 	// Per-user credentials change connection params → can't share pool connection.
 	// Fall back to per-agent mode when user has custom credentials.
 	hasUserCreds := contextCreds != nil && (contextCreds.APIKey != "" || len(contextCreds.Headers) > 0 || len(contextCreds.Env) > 0)
-	if userID != "" && m.store != nil {
-		if uc, _ := m.store.GetUserCredentials(ctx, srv.ID, userID); uc != nil && (uc.APIKey != "" || len(uc.Headers) > 0 || len(uc.Env) > 0) {
+	if userID != "" && st != nil {
+		if uc, _ := st.GetUserCredentials(ctx, srv.ID, userID); uc != nil && (uc.APIKey != "" || len(uc.Headers) > 0 || len(uc.Env) > 0) {
 			hasUserCreds = true
 		}
 	}
@@ -372,19 +393,20 @@ func (m *Manager) connectAndFilter(ctx context.Context, rs *resolvedServer) erro
 	srv := rs.info.Server
 	hints := ParseToolHints(srv.Settings)
 	protocol := ParseProtocolMode(srv.Settings)
+	taskEvents := ParseTaskEvents(srv.Settings)
 
 	if m.pool != nil && !rs.hasUserCreds {
 		// Pool mode: acquire shared connection, create per-agent BridgeTools
 		tid := store.TenantIDFromContext(ctx)
 		return m.connectViaPool(ctx, tid, srv.Name, srv.Transport, srv.Command,
 			rs.args, rs.env, srv.URL, rs.headers, srv.ToolPrefix, srv.TimeoutSec, srv.ID, hints,
-			rs.info.ToolAllow, rs.info.ToolDeny, protocol)
+			rs.info.ToolAllow, rs.info.ToolDeny, protocol, taskEvents)
 	}
 	// Per-agent mode: create per-agent connection
 	return m.connectServer(ctx, srv.Name, srv.Transport, srv.Command,
 		rs.args, rs.env, srv.URL, rs.headers,
 		srv.ToolPrefix, srv.TimeoutSec, srv.ID, hints,
-		rs.info.ToolAllow, rs.info.ToolDeny, protocol)
+		rs.info.ToolAllow, rs.info.ToolDeny, protocol, taskEvents)
 }
 
 // LoadForAgent connects MCP servers accessible by a specific agent+user.
@@ -424,7 +446,57 @@ func (m *Manager) LoadForAgent(ctx context.Context, agentID uuid.UUID, userID st
 	// Check if we should enter search mode (too many tools to inline)
 	m.maybeEnterSearchMode()
 
+	m.maybeRegisterTaskTool(ctx, agentID, accessible)
+
 	return nil
+}
+
+// maybeRegisterTaskTool registers the mcp_task tool when the pool has a task
+// watch manager and the agent may have tasks: it has a granted, enabled
+// streamable-http or sse server whose protocol setting is not legacy, or it
+// has an open mcp_tasks row. Both are known without a connection.
+func (m *Manager) maybeRegisterTaskTool(ctx context.Context, agentID uuid.UUID, accessible []store.MCPAccessInfo) {
+	tw := m.pool.TaskWatch()
+	if tw == nil {
+		return
+	}
+	need := false
+	for _, info := range accessible {
+		if serverMayStartTasks(info.Server) {
+			need = true
+			break
+		}
+	}
+	if !need && agentID != uuid.Nil {
+		open, err := tw.Tasks().HasOpenTaskForAgent(ctx, agentID)
+		if err != nil {
+			slog.Warn("mcp.task_tool.open_rows_check_failed", "agent", agentID, "error", err.Error())
+		}
+		need = open
+	}
+	if !need {
+		return
+	}
+	if _, exists := m.registry.Get(mcpTaskToolName); exists {
+		return
+	}
+	m.registry.Register(NewMCPTaskTool(tw))
+	m.mu.Lock()
+	m.taskToolRegistered = true
+	m.mu.Unlock()
+}
+
+// serverMayStartTasks reports whether a server can return tasks: an enabled
+// streamable-http or sse server whose protocol setting is not legacy.
+func serverMayStartTasks(srv store.MCPServerData) bool {
+	if !srv.Enabled {
+		return false
+	}
+	switch srv.Transport {
+	case "streamable-http", "sse":
+		return ParseProtocolMode(srv.Settings) != ProtocolLegacy
+	}
+	return false
 }
 
 // maybeEnterSearchMode partially defers MCP tools when total count exceeds
@@ -620,6 +692,10 @@ func (m *Manager) Stop() {
 				m.registry.Unregister(toolName)
 			}
 		}
+	}
+	if m.taskToolRegistered {
+		m.registry.Unregister(mcpTaskToolName)
+		m.taskToolRegistered = false
 	}
 	m.servers = make(map[string]*serverState)
 	m.poolServers = nil

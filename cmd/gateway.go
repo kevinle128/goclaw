@@ -361,6 +361,14 @@ func runGateway() {
 	if mcpPool != nil {
 		defer mcpPool.Stop()
 	}
+	// Resume the watchers of open MCP tasks. Deferred after the pool stop,
+	// so the watchers end before the pool closes its connections.
+	if taskWatch := mcpPool.TaskWatch(); taskWatch != nil {
+		if err := taskWatch.Start(context.Background()); err != nil {
+			slog.Warn("mcp.task.watch_resume_failed", "error", err)
+		}
+		defer taskWatch.Stop()
+	}
 
 	// Populate shared deps struct used by extracted helper methods.
 	deps := &gatewayDeps{

@@ -180,14 +180,15 @@ func checkLiveness(ctx context.Context, client *mcpclient.Client) error {
 // pass a zero-value ToolHints{} for config-path servers or when no hints are configured.
 // toolAllow/toolDeny come from the agent's grant — non-allowed tools are filtered out
 // upfront so the LLM never sees tools it cannot call. Pass nil for config-path servers.
-func (m *Manager) connectServer(ctx context.Context, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string, protocol ProtocolMode) error {
+// taskEvents is the server setting task_events (nil when not set).
+func (m *Manager) connectServer(ctx context.Context, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string, protocol ProtocolMode, taskEvents *TaskEventsBinding) error {
 	ss, mcpTools, err := connectAndDiscover(ctx, name, transportType, command, args, env, url, headers, timeoutSec, protocol)
 	if err != nil {
 		return err
 	}
 
 	// Register tools (filtered by grant's tool_allow/tool_deny upfront)
-	registeredNames := m.registerBridgeTools(ss, mcpTools, name, toolPrefix, timeoutSec, serverID, hints, toolAllow, toolDeny)
+	registeredNames := m.registerBridgeTools(ss, mcpTools, name, toolPrefix, timeoutSec, serverID, hints, toolAllow, toolDeny, taskEvents)
 	ss.toolNames = registeredNames
 
 	// Create health monitoring context
@@ -223,7 +224,7 @@ func (m *Manager) connectServer(ctx context.Context, name, transportType, comman
 // never get a BridgeTool created — the LLM never sees them, eliminating the
 // "registered then runtime-denied" loop that produced repeated grant-revoked
 // errors. Pass nil/nil to register every discovered tool.
-func (m *Manager) registerBridgeTools(ss *serverState, mcpTools []mcpgo.Tool, serverName, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string) []string {
+func (m *Manager) registerBridgeTools(ss *serverState, mcpTools []mcpgo.Tool, serverName, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string, taskEvents *TaskEventsBinding) []string {
 	var registeredNames []string
 	var filteredOut []string
 	for _, mcpTool := range mcpTools {
@@ -235,7 +236,8 @@ func (m *Manager) registerBridgeTools(ss *serverState, mcpTools []mcpgo.Tool, se
 		bt := NewBridgeTool(serverName, mcpTool, &ss.clientPtr, toolPrefix, timeoutSec, &ss.connected, serverID, m.grantChecker).
 			WithHints(hints.Global, hints.HintFor(mcpTool.Name)).
 			WithForceReconnect(func(reason string) { ss.requestForceReconnect(reason) }).
-			WithTaskStarter(m.taskStarter)
+			WithTaskStarter(m.starter()).
+			WithTaskEvents(taskEvents)
 
 		if _, exists := m.registry.Get(bt.Name()); exists {
 			slog.Warn("mcp.tool.name_collision",
@@ -269,14 +271,14 @@ func (m *Manager) registerBridgeTools(ss *serverState, mcpTools []mcpgo.Tool, se
 // description hints from MCPServerData.Settings.tool_hints.
 // toolAllow/toolDeny come from the agent's grant — non-allowed tools are filtered
 // out upfront so the LLM never sees tools it cannot call.
-func (m *Manager) connectViaPool(ctx context.Context, tenantID uuid.UUID, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string, protocol ProtocolMode) error {
+func (m *Manager) connectViaPool(ctx context.Context, tenantID uuid.UUID, name, transportType, command string, args []string, env map[string]string, url string, headers map[string]string, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string, protocol ProtocolMode, taskEvents *TaskEventsBinding) error {
 	entry, err := m.pool.Acquire(ctx, tenantID, name, transportType, command, args, env, url, headers, timeoutSec, WithProtocolMode(protocol))
 	if err != nil {
 		return err
 	}
 
 	// Create per-agent BridgeTools from the pool's shared connection
-	registeredNames := m.registerPoolBridgeTools(entry, name, toolPrefix, timeoutSec, serverID, hints, toolAllow, toolDeny)
+	registeredNames := m.registerPoolBridgeTools(entry, name, toolPrefix, timeoutSec, serverID, hints, toolAllow, toolDeny, taskEvents)
 
 	// Track server state and per-agent tool names.
 	// poolServers/poolToolNames keyed by plain name for Close() iteration.
@@ -317,7 +319,7 @@ func (m *Manager) connectViaPool(ctx context.Context, tenantID uuid.UUID, name, 
 // hints.Global applies to all tools; hints.Tools[name] adds a per-tool hint.
 // toolAllow/toolDeny are evaluated via IsToolAllowed so filtered-out tools never
 // get a BridgeTool created (LLM never sees them).
-func (m *Manager) registerPoolBridgeTools(entry *poolEntry, serverName, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string) []string {
+func (m *Manager) registerPoolBridgeTools(entry *poolEntry, serverName, toolPrefix string, timeoutSec int, serverID uuid.UUID, hints ToolHints, toolAllow, toolDeny []string, taskEvents *TaskEventsBinding) []string {
 	var registeredNames []string
 	var filteredOut []string
 	for _, mcpTool := range entry.tools {
@@ -329,7 +331,8 @@ func (m *Manager) registerPoolBridgeTools(entry *poolEntry, serverName, toolPref
 		bt := NewBridgeTool(serverName, mcpTool, &entry.state.clientPtr, toolPrefix, timeoutSec, &entry.state.connected, serverID, m.grantChecker).
 			WithHints(hints.Global, hints.HintFor(mcpTool.Name)).
 			WithForceReconnect(entry.RequestForceReconnect()).
-			WithTaskStarter(m.taskStarter)
+			WithTaskStarter(m.starter()).
+			WithTaskEvents(taskEvents)
 
 		if _, exists := m.registry.Get(bt.Name()); exists {
 			slog.Warn("mcp.tool.name_collision",

@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -423,7 +424,8 @@ func (s *Server) CreateTaskReply(taskID string) Reply {
 	})
 }
 
-// Task returns a copy of a task.
+// Task returns a copy of a task. The input request map is copied too, so a
+// caller can encode the copy while the task changes.
 func (s *Server) Task(id string) (Task, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -431,7 +433,9 @@ func (s *Server) Task(id string) (Task, bool) {
 	if !ok {
 		return Task{}, false
 	}
-	return *t, true
+	c := *t
+	c.InputRequests = maps.Clone(t.InputRequests)
+	return c, true
 }
 
 // UpdateTask changes a task under the stub lock and sets lastUpdatedAt. It

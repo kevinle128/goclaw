@@ -46,6 +46,10 @@ type TaskStart struct {
 	// (ID and Timeout are cleared).
 	Capabilities RawOpts
 	Task         CreateTaskResult
+	// EventCursor is the cursor of the events/poll sent before the
+	// tools/call (nil when no poll was sent, it failed, or the server
+	// returned a null cursor).
+	EventCursor *string
 }
 
 // TaskStarter receives tasks started by modern tools/call requests. It
@@ -71,6 +75,13 @@ func (t *BridgeTool) executeModern(ctx, callCtx context.Context, client *mcpclie
 	params := map[string]any{"name": t.toolName}
 	if args != nil {
 		params["arguments"] = args
+	}
+
+	// The cursor of "now" must exist before the task starts, so that the
+	// watcher sees every event of the task from its first one.
+	var cursor *string
+	if t.wantsBootstrapPoll(opts) {
+		cursor = bootstrapCursor(callCtx, client, t.taskEvents, opts)
 	}
 
 	raw, err := rawCall(callCtx, client, methodToolsCall, params, opts)
@@ -120,6 +131,7 @@ func (t *BridgeTool) executeModern(ctx, callCtx context.Context, client *mcpclie
 				Client:         client,
 				Capabilities:   taskCaps,
 				Task:           task,
+				EventCursor:    cursor,
 			})
 		}
 		// The task id and status come from the server, so they are wrapped
@@ -138,4 +150,12 @@ func (t *BridgeTool) executeModern(ctx, callCtx context.Context, client *mcpclie
 		}
 		return tools.ErrorResult(fmt.Sprintf("MCP tool %q error: unknown resultType %q", t.registeredName, rt))
 	}
+}
+
+// wantsBootstrapPoll reports whether a tools/call must be preceded by the
+// events/poll that gets a cursor: the server advertises tasks and events,
+// the server setting task_events is set, a TaskStarter takes the task, and
+// the tool does not forbid tasks.
+func (t *BridgeTool) wantsBootstrapPoll(opts RawOpts) bool {
+	return opts.Tasks && opts.Events && t.taskEvents != nil && t.taskStarter != nil && !t.taskForbidden
 }

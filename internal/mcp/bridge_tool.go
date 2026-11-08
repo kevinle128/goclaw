@@ -58,6 +58,11 @@ type BridgeTool struct {
 	// taskStarter receives tasks that a modern tools/call starts. Optional —
 	// nil reports the task id and status as the tool result.
 	taskStarter TaskStarter
+	// taskEvents is the server setting task_events (nil = not set).
+	taskEvents *TaskEventsBinding
+	// taskForbidden is true when the tool declares execution.taskSupport
+	// "forbidden": it never returns a task.
+	taskForbidden bool
 }
 
 // NewBridgeTool creates a BridgeTool from an MCP Tool definition.
@@ -94,6 +99,7 @@ func NewBridgeTool(serverName string, mcpTool mcpgo.Tool, clientPtr *atomic.Poin
 		timeoutSec:     timeoutSec,
 		connected:      connected,
 		grantChecker:   grantChecker,
+		taskForbidden:  mcpTool.Execution != nil && mcpTool.Execution.TaskSupport == mcpgo.TaskSupportForbidden,
 	}
 }
 
@@ -142,6 +148,14 @@ func (t *BridgeTool) WithForceReconnect(fn func(reason string)) *BridgeTool {
 // tools/call (see TaskStarter). nil keeps the default task-started text.
 func (t *BridgeTool) WithTaskStarter(ts TaskStarter) *BridgeTool {
 	t.taskStarter = ts
+	return t
+}
+
+// WithTaskEvents attaches the server setting task_events (see
+// ParseTaskEvents). With it, a modern tools/call that may start a task first
+// sends events/poll to get a cursor for the task watcher. nil disables it.
+func (t *BridgeTool) WithTaskEvents(b *TaskEventsBinding) *BridgeTool {
+	t.taskEvents = b
 	return t
 }
 
