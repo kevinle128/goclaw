@@ -1,10 +1,12 @@
 package mcp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -492,8 +494,69 @@ func serverMayStartTasks(srv store.MCPServerData) bool {
 	return srv.Enabled && !legacyOnly(srv.Transport, ParseProtocolMode(srv.Settings))
 }
 
+// splitInlineTools picks the MCP tools that stay inline in search mode. Every
+// tool of a server with a task_events binding stays inline, because a turn
+// that a task wakes must be able to call that server's tools by name. The
+// other tools fill the rest of the inline limit in server name order, then
+// tool name order, so every load gives the same split.
+func (m *Manager) splitInlineTools() (inline, deferred []string) {
+	type entry struct{ server, name string }
+	var pinned, rest []entry
+	m.mu.RLock()
+	for serverName, ss := range m.servers {
+		names := ss.toolNames
+		if _, isPool := m.poolServers[serverName]; isPool {
+			names = m.poolToolNames[serverName]
+		}
+		pin := m.hasTaskEventsBinding(names)
+		for _, name := range names {
+			if pin {
+				pinned = append(pinned, entry{serverName, name})
+			} else {
+				rest = append(rest, entry{serverName, name})
+			}
+		}
+	}
+	m.mu.RUnlock()
+
+	byServerThenName := func(a, b entry) int {
+		if c := cmp.Compare(a.server, b.server); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.name, b.name)
+	}
+	slices.SortFunc(pinned, byServerThenName)
+	slices.SortFunc(rest, byServerThenName)
+
+	room := max(mcpToolInlineMaxCount-len(pinned), 0)
+	for _, e := range pinned {
+		inline = append(inline, e.name)
+	}
+	for i, e := range rest {
+		if i < room {
+			inline = append(inline, e.name)
+		} else {
+			deferred = append(deferred, e.name)
+		}
+	}
+	return inline, deferred
+}
+
+// hasTaskEventsBinding reports whether any of the registered tools has a
+// task_events binding (all tools of one server share the server setting).
+func (m *Manager) hasTaskEventsBinding(names []string) bool {
+	for _, name := range names {
+		if t, ok := m.registry.Get(name); ok {
+			if bridge, ok := t.(*BridgeTool); ok && bridge.taskEvents != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // maybeEnterSearchMode partially defers MCP tools when total count exceeds
-// the inline threshold. The first mcpToolInlineMaxCount tools stay registered
+// the inline threshold. splitInlineTools decides which tools stay registered
 // inline; the rest are moved to deferredTools and discovered via mcp_tool_search.
 func (m *Manager) maybeEnterSearchMode() {
 	allNames := m.ToolNames()
@@ -501,9 +564,12 @@ func (m *Manager) maybeEnterSearchMode() {
 		return
 	}
 
-	// Build a set of names to defer (everything beyond the threshold).
-	deferSet := make(map[string]struct{}, len(allNames)-mcpToolInlineMaxCount)
-	for _, name := range allNames[mcpToolInlineMaxCount:] {
+	inlineNames, deferNames := m.splitInlineTools()
+	if len(deferNames) == 0 {
+		return
+	}
+	deferSet := make(map[string]struct{}, len(deferNames))
+	for _, name := range deferNames {
 		deferSet[name] = struct{}{}
 	}
 
@@ -545,7 +611,6 @@ func (m *Manager) maybeEnterSearchMode() {
 	}
 
 	// Update "mcp" group to only the kept inline names.
-	inlineNames := allNames[:mcpToolInlineMaxCount]
 	m.registry.RegisterToolGroup("mcp", inlineNames)
 	m.searchMode = true
 
