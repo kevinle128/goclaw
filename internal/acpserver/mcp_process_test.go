@@ -94,6 +94,49 @@ func TestMCPEnvironmentDoesNotInheritHostSecrets(t *testing.T) {
 	}
 }
 
+func TestMCPEnvironmentRedactsOnlySecretLookingValues(t *testing.T) {
+	entries := []EnvVariable{
+		{Name: "GIT_TERMINAL_PROMPT", Value: "0"},
+		{Name: "GIT_CONFIG_COUNT", Value: "11"},
+		{Name: "GIT_CONFIG_VALUE_1", Value: "nostr"},
+		{Name: "GIT_CONFIG_VALUE_2", Value: "true"},
+		{Name: "GIT_CONFIG_VALUE_5", Value: "x509"},
+		{Name: "GIT_CONFIG_VALUE_3", Value: "/opt/buzz-goclaw/bin/mbuzz-261006/git-credential-nostr"},
+		{Name: "GIT_CONFIG_VALUE_10", Value: "https://vtc.example.ts.net/git/"},
+		{Name: "BUZZ_OUTPUT_FORMAT", Value: "agent"},
+		{Name: "BUZZ_GIT_IDENTITY", Value: "agent"},
+		{Name: "BUZZ_PRIVATE_KEY", Value: "k1"},
+		{Name: "BUZZ_AUTH_TAG", Value: "tag-9"},
+		{Name: "OPAQUE_VALUE", Value: "c2VjcmV0LXZhbHVlLXJhbmRvbQ"},
+		{Name: "MIRROR_URL", Value: "https://user:pass@mirror.example/repo"},
+	}
+	environment, secrets, err := minimalMCPEnvironment(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(environment, "GIT_TERMINAL_PROMPT=0") || !slices.Contains(environment, "GIT_CONFIG_VALUE_2=true") {
+		t.Fatalf("every value must still reach the MCP process: %v", environment)
+	}
+	want := []string{"k1", "tag-9", "c2VjcmV0LXZhbHVlLXJhbmRvbQ", "https://user:pass@mirror.example/repo"}
+	slices.Sort(want)
+	got := slices.Clone(secrets)
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("secrets = %v, want %v", got, want)
+	}
+	schema := map[string]any{
+		"$schema":     "https://json-schema.org/draft/2020-12/schema",
+		"description": "returns true for 11 agent items from /opt/buzz-goclaw/bin/mbuzz-261006/git-credential-nostr; tag tag-9",
+	}
+	filtered := redactSecretValues(schema, secrets).(map[string]any)
+	if filtered["$schema"] != "https://json-schema.org/draft/2020-12/schema" {
+		t.Fatalf("schema URI was changed: %v", filtered["$schema"])
+	}
+	if filtered["description"] != "returns true for 11 agent items from /opt/buzz-goclaw/bin/mbuzz-261006/git-credential-nostr; tag [REDACTED]" {
+		t.Fatalf("description = %q", filtered["description"])
+	}
+}
+
 func TestMCPEnvironmentAllowsClientPathOverlay(t *testing.T) {
 	t.Setenv("PATH", "/inherited/bin")
 	entries := []EnvVariable{{Name: "PATH", Value: "/buzz/bin:/usr/bin"}}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -322,7 +323,7 @@ func minimalMCPEnvironment(entries []EnvVariable) ([]string, []string, error) {
 		}
 		seen[entry.Name] = struct{}{}
 		values[entry.Name] = entry.Value
-		if entry.Value != "" {
+		if isSecretEnvValue(entry.Name, entry.Value) {
 			secrets = append(secrets, entry.Value)
 		}
 	}
@@ -336,6 +337,38 @@ func minimalMCPEnvironment(entries []EnvVariable) ([]string, []string, error) {
 		environment = append(environment, key+"="+values[key])
 	}
 	return environment, secrets, nil
+}
+
+// secretEnvName matches env names that hold credentials. Their values are
+// always redacted from MCP schemas and results, whatever their length.
+var secretEnvName = regexp.MustCompile(`(?i)KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|AUTH|CREDENTIAL|NSEC|COOKIE|SESSION`)
+
+// minSecretEnvValueBytes is the shortest value under a neutral env name that
+// is redacted. Short values such as "0", "true" or "11" are settings, not
+// secrets, and replacing them everywhere would corrupt schemas and results.
+const minSecretEnvValueBytes = 16
+
+// isSecretEnvValue reports whether an env value from the client is redacted
+// from the MCP server's tool schemas and results. Values under a credential
+// name are always secret. Other values are secret only when they are long and
+// are not a plain filesystem path or a URL without embedded credentials.
+func isSecretEnvValue(name, value string) bool {
+	if value == "" {
+		return false
+	}
+	if secretEnvName.MatchString(name) {
+		return true
+	}
+	if len(value) < minSecretEnvValueBytes {
+		return false
+	}
+	if filepath.IsAbs(value) && !strings.ContainsAny(value, " \t\n") {
+		return false
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		return parsed.User != nil
+	}
+	return true
 }
 
 func redactSecretValues(value any, secrets []string) any {
