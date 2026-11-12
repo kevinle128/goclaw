@@ -10,7 +10,7 @@ import (
 
 func TestSessionRejectsSecondActivePrompt(t *testing.T) {
 	r := NewSessionRegistry(0)
-	if err := r.Add(&sessionRecord{ID: "s", SessionKey: "key"}); err != nil {
+	if _, err := r.Add(&sessionRecord{ID: "s", SessionKey: "key"}); err != nil {
 		t.Fatal(err)
 	}
 	_, generation, _, err := r.BeginPrompt("s", context.Background(), nil)
@@ -27,7 +27,7 @@ func TestSessionRejectsSecondActivePrompt(t *testing.T) {
 
 func TestSessionLateOldGenerationCannotFinishNewPrompt(t *testing.T) {
 	r := NewSessionRegistry(0)
-	if err := r.Add(&sessionRecord{ID: "s", SessionKey: "key"}); err != nil {
+	if _, err := r.Add(&sessionRecord{ID: "s", SessionKey: "key"}); err != nil {
 		t.Fatal(err)
 	}
 	_, first, _, _ := r.BeginPrompt("s", context.Background(), nil)
@@ -52,7 +52,7 @@ func TestBeginPromptUsesConfiguredMaxDuration(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := NewSessionRegistry(test.configured)
-			if err := r.Add(&sessionRecord{ID: "s", SessionKey: "key"}); err != nil {
+			if _, err := r.Add(&sessionRecord{ID: "s", SessionKey: "key"}); err != nil {
 				t.Fatal(err)
 			}
 			before := time.Now()
@@ -76,7 +76,7 @@ func TestBeginPromptUsesConfiguredMaxDuration(t *testing.T) {
 func TestThreadContextFromSessionNewAndPromptOverride(t *testing.T) {
 	r := NewSessionRegistry(0)
 	sessionThread := json.RawMessage(`{"channelId":"c1","rootEventId":"e1"}`)
-	if err := r.Add(&sessionRecord{ID: "s", SessionKey: "key", thread: sessionThread}); err != nil {
+	if _, err := r.Add(&sessionRecord{ID: "s", SessionKey: "key", thread: sessionThread}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := r.PromptContext("s", 1); ok {
