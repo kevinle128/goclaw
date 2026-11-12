@@ -77,7 +77,7 @@ func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) err
 		s.mu.Unlock()
 		return errors.New("ACP server is already running")
 	}
-	transport := NewTransport(input, output, Handler{NewSession: s.handleNewSession, Prompt: s.handlePrompt, Cancel: s.handleCancel, Initialized: s.handleInitialized}, s.version)
+	transport := NewTransport(input, output, Handler{NewSession: s.handleNewSession, Prompt: s.handlePrompt, Cancel: s.handleCancel, Initialized: s.handleInitialized, HasSession: s.hasSession}, s.version)
 	s.transport = transport
 	lifeCtx, stopLife := context.WithCancel(ctx)
 	s.lifeCtx = lifeCtx
@@ -143,15 +143,26 @@ func (s *Server) handleNewSession(ctx context.Context, params NewSessionParams) 
 		return NewSessionResult{}, err
 	}
 	if evicted != "" {
-		s.mu.Lock()
-		transport := s.transport
-		s.mu.Unlock()
-		if transport != nil {
-			transport.removeSession(evicted)
-		}
+		s.forgetTransportSession(evicted)
 		slog.Info("acp.session.evicted", "reason", "session limit")
 	}
 	return NewSessionResult{SessionID: id}, nil
+}
+
+// forgetTransportSession tells the transport that a session is gone.
+func (s *Server) forgetTransportSession(id string) {
+	s.mu.Lock()
+	transport := s.transport
+	s.mu.Unlock()
+	if transport != nil {
+		transport.removeSession(id)
+	}
+}
+
+// hasSession reports whether the registry still holds a session.
+func (s *Server) hasSession(id string) bool {
+	_, ok := s.sessions.Get(id)
+	return ok
 }
 
 // startSessionMCP starts the MCP servers of a session and returns the
@@ -185,8 +196,12 @@ func (s *Server) resumeSessionMCP(ctx context.Context, record *sessionRecord, ge
 	}
 	manager, schemas, err := s.startSessionMCP(ctx, record.CWD, servers)
 	if err != nil {
+		// Drop the session so the client creates a new one, instead of
+		// failing every later prompt on it.
 		slog.Warn("acp.session.mcp_resume_failed", "error", err)
-		return &RPCError{Code: CodeInternalError, Message: "MCP servers could not be started again"}
+		s.sessions.Release(record.ID)
+		s.forgetTransportSession(record.ID)
+		return &RPCError{Code: CodeUnknownSession, Message: "Unknown session"}
 	}
 	if !s.sessions.resumeMCP(record.ID, generation, manager, schemas) {
 		if closeErr := manager.Close(); closeErr != nil {
@@ -272,7 +287,7 @@ func (s *Server) handlePrompt(ctx context.Context, params PromptParams) (PromptR
 			if event.Generation != generation {
 				continue
 			}
-			if event.Event == protocol.EventACPToolCall && record.mcp != nil {
+			if event.Event == protocol.EventACPToolCall && record.mcpManager() != nil {
 				go s.handleMCPToolCall(promptCtx, record, event, capabilityID, generation)
 				continue
 			}
@@ -347,7 +362,10 @@ func (s *Server) handleMCPToolCall(ctx context.Context, record *sessionRecord, e
 	}
 	callCtx, cancelCall := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancelCall()
-	content, isError, err := record.mcp.Call(callCtx, payload.ToolName, payload.Arguments)
+	content, isError, err := "MCP tool call failed", true, error(nil)
+	if manager := record.mcpManager(); manager != nil {
+		content, isError, err = manager.Call(callCtx, payload.ToolName, payload.Arguments)
+	}
 	if err != nil {
 		content, isError = "MCP tool call failed", true
 	}

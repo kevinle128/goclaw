@@ -29,6 +29,9 @@ type Handler struct {
 	NewSession func(context.Context, NewSessionParams) (NewSessionResult, error)
 	Prompt     func(context.Context, PromptParams) (PromptResult, error)
 	Cancel     func(context.Context, CancelParams)
+	// HasSession, when set, reports whether the server still holds a session.
+	// The server can drop a session; the transport then refuses its id.
+	HasSession func(string) bool
 	// Initialized runs once after the initialize result is queued, with the
 	// client capabilities. It runs on the read loop and must not block.
 	Initialized func(context.Context, ClientCapabilities)
@@ -419,7 +422,7 @@ func (t *Transport) dispatch(ctx context.Context, line []byte) error {
 			if err != nil {
 				return nil, err
 			}
-			if result.SessionID == "" || !t.addSession(result.SessionID) {
+			if result.SessionID == "" || !t.addSession(result.SessionID) || !t.hasSession(result.SessionID) {
 				return nil, errors.New("invalid session result")
 			}
 			return result, nil
@@ -642,6 +645,11 @@ func (t *Transport) hasSession(sessionID string) bool {
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
 	_, ok := t.state.sessions[sessionID]
+	if ok && t.handler.HasSession != nil && !t.handler.HasSession(sessionID) {
+		// The server dropped it after this transport recorded it.
+		delete(t.state.sessions, sessionID)
+		return false
+	}
 	return ok
 }
 

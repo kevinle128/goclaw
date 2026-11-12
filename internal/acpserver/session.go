@@ -29,6 +29,9 @@ type sessionRecord struct {
 	// idle session stops its MCP processes; the next prompt starts them again
 	// from these definitions.
 	servers []MCPServer
+	// removed is set when the registry drops the record. A prompt that found
+	// the record just before then must not start on it.
+	removed bool
 	// thread is the _meta["buzz.thread"] value from session/new, or nil.
 	thread json.RawMessage
 }
@@ -76,41 +79,55 @@ func (r *SessionRegistry) Add(record *sessionRecord) (evicted string, err error)
 		r.mu.Unlock()
 		return "", errors.New("ACP session already exists")
 	}
-	var victim *sessionRecord
 	if len(r.sessions) >= r.limit {
-		victim = r.oldestIdleLocked()
-		if victim == nil {
+		victim := r.evictOldestIdleLocked()
+		if victim == "" {
 			r.mu.Unlock()
 			return "", errors.New("ACP session limit reached")
 		}
-		delete(r.sessions, victim.ID)
+		evicted = victim
 	}
 	record.lastActive = r.now()
 	r.sessions[record.ID] = record
 	r.mu.Unlock()
-	if victim == nil {
-		return "", nil
-	}
-	victim.mu.Lock()
-	closeSessionMCP(victim)
-	victim.mu.Unlock()
-	return victim.ID, nil
+	return evicted, nil
 }
 
-// oldestIdleLocked returns the idle session with the oldest activity, or nil.
-// The caller holds r.mu.
-func (r *SessionRegistry) oldestIdleLocked() *sessionRecord {
-	var oldest *sessionRecord
-	var oldestAt time.Time
-	for _, candidate := range r.sessions {
-		candidate.mu.Lock()
-		idle, at := candidate.active == nil, candidate.lastActive
-		candidate.mu.Unlock()
-		if idle && (oldest == nil || at.Before(oldestAt)) {
-			oldest, oldestAt = candidate, at
+// evictOldestIdleLocked removes the idle session with the oldest activity and
+// returns its id, or "" when every session has an active prompt. The caller
+// holds r.mu. A candidate is checked again under its own lock, because a
+// prompt can start on it after the first look.
+func (r *SessionRegistry) evictOldestIdleLocked() string {
+	skipped := make(map[string]struct{})
+	for {
+		var oldest *sessionRecord
+		var oldestAt time.Time
+		for id, candidate := range r.sessions {
+			if _, skip := skipped[id]; skip {
+				continue
+			}
+			candidate.mu.Lock()
+			idle, at := candidate.active == nil, candidate.lastActive
+			candidate.mu.Unlock()
+			if idle && (oldest == nil || at.Before(oldestAt)) {
+				oldest, oldestAt = candidate, at
+			}
 		}
+		if oldest == nil {
+			return ""
+		}
+		oldest.mu.Lock()
+		if oldest.active != nil {
+			oldest.mu.Unlock()
+			skipped[oldest.ID] = struct{}{}
+			continue
+		}
+		oldest.removed = true
+		closeSessionMCP(oldest)
+		oldest.mu.Unlock()
+		delete(r.sessions, oldest.ID)
+		return oldest.ID
 	}
-	return oldest
 }
 
 func (r *SessionRegistry) Get(id string) (*sessionRecord, bool) {
@@ -129,6 +146,9 @@ func (r *SessionRegistry) BeginPrompt(id string, parent context.Context, thread 
 	}
 	record.mu.Lock()
 	defer record.mu.Unlock()
+	if record.removed {
+		return nil, 0, nil, &RPCError{Code: CodeUnknownSession, Message: "Unknown session"}
+	}
 	if record.active != nil {
 		return nil, 0, nil, ErrPromptActive
 	}
@@ -211,6 +231,7 @@ func (r *SessionRegistry) Release(id string) {
 		return
 	}
 	record.mu.Lock()
+	record.removed = true
 	if record.active != nil {
 		record.active.cancel()
 		record.active = nil
@@ -226,6 +247,7 @@ func (r *SessionRegistry) Close() {
 	r.mu.Unlock()
 	for _, record := range records {
 		record.mu.Lock()
+		record.removed = true
 		if record.active != nil {
 			record.active.cancel()
 			record.active = nil
@@ -275,6 +297,14 @@ func (r *SessionRegistry) resumeMCP(id string, generation uint64, manager *Sessi
 	}
 	record.mcp, record.tools = manager, tools
 	return true
+}
+
+// mcpManager returns the session's MCP manager, or nil when its MCP
+// processes are stopped.
+func (record *sessionRecord) mcpManager() *SessionMCPManager {
+	record.mu.Lock()
+	defer record.mu.Unlock()
+	return record.mcp
 }
 
 func closeSessionMCP(record *sessionRecord) {

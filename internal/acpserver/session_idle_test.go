@@ -2,6 +2,7 @@ package acpserver
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -184,5 +185,89 @@ func TestTransportAcceptsSessionsBeyondLimitWhenOldOnesAreEvicted(t *testing.T) 
 	}
 	if transport.hasSession(first) {
 		t.Fatal("transport still accepts an evicted session")
+	}
+}
+
+func TestFailedMCPRestartDropsSession(t *testing.T) {
+	definition, execRoot := helperMCPServer(t)
+	root := t.TempDir()
+	cwd := filepath.Join(root, "project")
+	if err := os.Mkdir(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(ServerConfig{Gateway: NewGatewayClient(GatewayClientConfig{}), AgentID: "fixed", WorkspaceRoot: root, MCPExecRoots: []string{execRoot}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.sessions.Close()
+	transport := NewTransport(strings.NewReader(""), io.Discard, Handler{HasSession: server.hasSession}, "test-version")
+	server.transport = transport
+	result, err := server.handleNewSession(context.Background(), NewSessionParams{CWD: cwd, MCPServers: []MCPServer{definition}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.addSession(result.SessionID)
+	record, _ := server.sessions.Get(result.SessionID)
+	server.sessions.ReapIdle(time.Now().Add(SessionIdleTTL+time.Minute), SessionIdleTTL)
+	record.mu.Lock()
+	record.servers[0].Command = filepath.Join(execRoot, "missing-mcp-server")
+	record.mu.Unlock()
+
+	_, generation, _, err := server.sessions.BeginPrompt(result.SessionID, context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = server.resumeSessionMCP(context.Background(), record, generation)
+	var rpcErr *RPCError
+	if !errors.As(err, &rpcErr) || rpcErr.Code != CodeUnknownSession {
+		t.Fatalf("resumeSessionMCP() = %v, want Unknown session so the client creates a new session", err)
+	}
+	if _, ok := server.sessions.Get(result.SessionID); ok {
+		t.Fatal("session with a failed MCP restart was kept")
+	}
+	if transport.hasSession(result.SessionID) {
+		t.Fatal("transport still accepts the dropped session")
+	}
+}
+
+func TestEvictedSessionIsMarkedAndStopsMCP(t *testing.T) {
+	r := NewSessionRegistry(0)
+	r.limit = 1
+	manager, err := NewSessionMCPManager(t.TempDir(), []string{t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := &sessionRecord{ID: "old", SessionKey: "old", mcp: manager}
+	if _, err := r.Add(old); err != nil {
+		t.Fatal(err)
+	}
+	if evicted, err := r.Add(&sessionRecord{ID: "new", SessionKey: "new"}); err != nil || evicted != "old" {
+		t.Fatalf("Add() = %q, %v", evicted, err)
+	}
+	old.mu.Lock()
+	removed, mcp := old.removed, old.mcp
+	old.mu.Unlock()
+	if !removed || mcp != nil {
+		t.Fatalf("evicted session removed=%v mcp=%v; want removed and MCP stopped", removed, mcp)
+	}
+	manager.mu.RLock()
+	closed := manager.closed
+	manager.mu.RUnlock()
+	if !closed {
+		t.Fatal("evicted session's MCP manager is still open")
+	}
+}
+
+func TestTransportRefusesSessionTheServerDropped(t *testing.T) {
+	transport := NewTransport(strings.NewReader(""), io.Discard, Handler{HasSession: func(string) bool { return false }}, "test-version")
+	transport.addSession("gone")
+	if transport.hasSession("gone") {
+		t.Fatal("transport accepted a session the server no longer holds")
+	}
+	transport.stateMu.Lock()
+	_, kept := transport.state.sessions["gone"]
+	transport.stateMu.Unlock()
+	if kept {
+		t.Fatal("transport kept the dropped session id")
 	}
 }
