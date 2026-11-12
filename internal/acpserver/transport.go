@@ -606,7 +606,9 @@ func (t *Transport) isInitialized() bool {
 func (t *Transport) reserveSession() bool {
 	t.stateMu.Lock()
 	defer t.stateMu.Unlock()
-	if len(t.state.sessions)+t.state.pendingSessions >= MaxActiveSessions {
+	// The session registry bounds the number of sessions and removes the
+	// oldest idle one when it is full; this bounds only concurrent creation.
+	if t.state.pendingSessions >= MaxActiveSessions {
 		return false
 	}
 	t.state.pendingSessions++
@@ -627,6 +629,13 @@ func (t *Transport) addSession(sessionID string) bool {
 	}
 	t.state.sessions[sessionID] = struct{}{}
 	return true
+}
+
+// removeSession forgets a session that the server removed.
+func (t *Transport) removeSession(sessionID string) {
+	t.stateMu.Lock()
+	delete(t.state.sessions, sessionID)
+	t.stateMu.Unlock()
 }
 
 func (t *Transport) hasSession(sessionID string) bool {

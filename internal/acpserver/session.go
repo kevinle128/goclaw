@@ -25,6 +25,10 @@ type sessionRecord struct {
 	lastActive time.Time
 	mcp        *SessionMCPManager
 	tools      []acpbridge.ToolSchema
+	// servers holds the checked MCP server definitions from session/new. An
+	// idle session stops its MCP processes; the next prompt starts them again
+	// from these definitions.
+	servers []MCPServer
 	// thread is the _meta["buzz.thread"] value from session/new, or nil.
 	thread json.RawMessage
 }
@@ -63,18 +67,50 @@ func NewSessionRegistry(maxPromptDuration time.Duration) *SessionRegistry {
 	return &SessionRegistry{sessions: make(map[string]*sessionRecord), now: time.Now, limit: MaxActiveSessions, maxPrompt: maxPromptDuration}
 }
 
-func (r *SessionRegistry) Add(record *sessionRecord) error {
+// Add stores a new session. When the registry is full, it removes the idle
+// session that was active least recently and returns its id as evicted. A
+// session with an active prompt is never removed.
+func (r *SessionRegistry) Add(record *sessionRecord) (evicted string, err error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.sessions) >= r.limit {
-		return errors.New("ACP session limit reached")
-	}
 	if _, exists := r.sessions[record.ID]; exists {
-		return errors.New("ACP session already exists")
+		r.mu.Unlock()
+		return "", errors.New("ACP session already exists")
+	}
+	var victim *sessionRecord
+	if len(r.sessions) >= r.limit {
+		victim = r.oldestIdleLocked()
+		if victim == nil {
+			r.mu.Unlock()
+			return "", errors.New("ACP session limit reached")
+		}
+		delete(r.sessions, victim.ID)
 	}
 	record.lastActive = r.now()
 	r.sessions[record.ID] = record
-	return nil
+	r.mu.Unlock()
+	if victim == nil {
+		return "", nil
+	}
+	victim.mu.Lock()
+	closeSessionMCP(victim)
+	victim.mu.Unlock()
+	return victim.ID, nil
+}
+
+// oldestIdleLocked returns the idle session with the oldest activity, or nil.
+// The caller holds r.mu.
+func (r *SessionRegistry) oldestIdleLocked() *sessionRecord {
+	var oldest *sessionRecord
+	var oldestAt time.Time
+	for _, candidate := range r.sessions {
+		candidate.mu.Lock()
+		idle, at := candidate.active == nil, candidate.lastActive
+		candidate.mu.Unlock()
+		if idle && (oldest == nil || at.Before(oldestAt)) {
+			oldest, oldestAt = candidate, at
+		}
+	}
+	return oldest
 }
 
 func (r *SessionRegistry) Get(id string) (*sessionRecord, bool) {
@@ -201,21 +237,44 @@ func (r *SessionRegistry) Close() {
 
 func (r *SessionRegistry) Len() int { r.mu.RLock(); defer r.mu.RUnlock(); return len(r.sessions) }
 
+// ReapIdle stops the MCP processes of sessions that have been idle for ttl.
+// The sessions stay registered: a client can wake a thread session hours
+// later, and its next prompt starts the MCP processes again. It returns the
+// number of sessions whose MCP processes were stopped.
 func (r *SessionRegistry) ReapIdle(now time.Time, ttl time.Duration) int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	removed := 0
-	for id, record := range r.sessions {
-		record.mu.Lock()
-		idle := record.active == nil && now.Sub(record.lastActive) >= ttl
-		record.mu.Unlock()
-		if idle {
-			delete(r.sessions, id)
-			closeSessionMCP(record)
-			removed++
-		}
+	r.mu.RLock()
+	records := make([]*sessionRecord, 0, len(r.sessions))
+	for _, record := range r.sessions {
+		records = append(records, record)
 	}
-	return removed
+	r.mu.RUnlock()
+	stopped := 0
+	for _, record := range records {
+		record.mu.Lock()
+		if record.active == nil && record.mcp != nil && now.Sub(record.lastActive) >= ttl {
+			closeSessionMCP(record)
+			stopped++
+		}
+		record.mu.Unlock()
+	}
+	return stopped
+}
+
+// resumeMCP sets the MCP manager that a prompt started again for a session
+// whose MCP processes were stopped. It refuses when the prompt with this
+// generation is no longer active, so a closed session gets no new processes.
+func (r *SessionRegistry) resumeMCP(id string, generation uint64, manager *SessionMCPManager, tools []acpbridge.ToolSchema) bool {
+	record, ok := r.Get(id)
+	if !ok {
+		return false
+	}
+	record.mu.Lock()
+	defer record.mu.Unlock()
+	if record.active == nil || record.active.generation != generation || record.mcp != nil {
+		return false
+	}
+	record.mcp, record.tools = manager, tools
+	return true
 }
 
 func closeSessionMCP(record *sessionRecord) {

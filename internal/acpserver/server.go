@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nextlevelbuilder/goclaw/internal/acpbridge"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
@@ -129,25 +130,72 @@ func (s *Server) handleNewSession(ctx context.Context, params NewSessionParams) 
 	id := uuid.NewString()
 	record := &sessionRecord{ID: id, SessionKey: sessions.BuildWSSessionKey(s.agentID, id), CWD: cwd, thread: bytes.Clone(params.Thread)}
 	if len(params.MCPServers) > 0 {
-		manager, managerErr := NewSessionMCPManager(s.workspaceRoot, s.mcpExecRoots)
-		if managerErr != nil {
-			return NewSessionResult{}, managerErr
-		}
-		startCtx, cancelStart := context.WithTimeout(ctx, 30*time.Second)
-		schemas, startErr := manager.Start(startCtx, cwd, params.MCPServers)
-		cancelStart()
+		manager, schemas, startErr := s.startSessionMCP(ctx, cwd, params.MCPServers)
 		if startErr != nil {
-			if closeErr := manager.Close(); closeErr != nil {
-				slog.Warn("close failed ACP MCP startup", "error", closeErr)
-			}
 			return NewSessionResult{}, startErr
 		}
 		record.mcp, record.tools = manager, schemas
+		record.servers = append([]MCPServer(nil), params.MCPServers...)
 	}
-	if err := s.sessions.Add(record); err != nil {
+	evicted, err := s.sessions.Add(record)
+	if err != nil {
+		closeSessionMCP(record)
 		return NewSessionResult{}, err
 	}
+	if evicted != "" {
+		s.mu.Lock()
+		transport := s.transport
+		s.mu.Unlock()
+		if transport != nil {
+			transport.removeSession(evicted)
+		}
+		slog.Info("acp.session.evicted", "reason", "session limit")
+	}
 	return NewSessionResult{SessionID: id}, nil
+}
+
+// startSessionMCP starts the MCP servers of a session and returns the
+// manager with the discovered tool schemas.
+func (s *Server) startSessionMCP(ctx context.Context, cwd string, servers []MCPServer) (*SessionMCPManager, []acpbridge.ToolSchema, error) {
+	manager, err := NewSessionMCPManager(s.workspaceRoot, s.mcpExecRoots)
+	if err != nil {
+		return nil, nil, err
+	}
+	startCtx, cancelStart := context.WithTimeout(ctx, 30*time.Second)
+	schemas, err := manager.Start(startCtx, cwd, servers)
+	cancelStart()
+	if err != nil {
+		if closeErr := manager.Close(); closeErr != nil {
+			slog.Warn("close failed ACP MCP startup", "error", closeErr)
+		}
+		return nil, nil, err
+	}
+	return manager, schemas, nil
+}
+
+// resumeSessionMCP starts the MCP servers again for a session whose MCP
+// processes were stopped while it was idle.
+func (s *Server) resumeSessionMCP(ctx context.Context, record *sessionRecord, generation uint64) error {
+	record.mu.Lock()
+	needed := record.mcp == nil && len(record.servers) > 0
+	servers := record.servers
+	record.mu.Unlock()
+	if !needed {
+		return nil
+	}
+	manager, schemas, err := s.startSessionMCP(ctx, record.CWD, servers)
+	if err != nil {
+		slog.Warn("acp.session.mcp_resume_failed", "error", err)
+		return &RPCError{Code: CodeInternalError, Message: "MCP servers could not be started again"}
+	}
+	if !s.sessions.resumeMCP(record.ID, generation, manager, schemas) {
+		if closeErr := manager.Close(); closeErr != nil {
+			slog.Warn("close unused ACP MCP manager", "error", closeErr)
+		}
+		return errors.New("ACP session closed while its MCP servers started")
+	}
+	slog.Info("acp.session.mcp_resumed", "servers", len(servers), "tools", len(schemas))
+	return nil
 }
 
 func (s *Server) handlePrompt(ctx context.Context, params PromptParams) (PromptResult, error) {
@@ -167,6 +215,9 @@ func (s *Server) handlePrompt(ctx context.Context, params PromptParams) (PromptR
 			slog.Warn("release ACP capability", "error", releaseErr)
 		}
 	}()
+	if err := s.resumeSessionMCP(promptCtx, record, generation); err != nil {
+		return PromptResult{}, err
+	}
 	// Reconnect before the event route exists, so a Gateway restart between
 	// prompts does not fail the next prompt.
 	if err := s.gateway.EnsureConnected(promptCtx); err != nil {
