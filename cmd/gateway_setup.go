@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -539,6 +540,9 @@ func setupSkillsSystem(
 		if len(storeDirs) > 0 {
 			skillsLoader.SetManagedDir(storeDirs[0])
 			slog.Info("skills-store directory wired into loader", "dir", storeDirs[0])
+			// Skills uploaded by a tenant live in that tenant's skills-store; without this the agents of
+			// that tenant never see them in the prompt or in skill_search.
+			skillsLoader.SetTenantManagedDir(tenantSkillsDirResolver(dataDir, pgStores.Tenants))
 
 			// Seed system/bundled skills into DB
 			bundledSkillsDir = os.Getenv("GOCLAW_BUNDLED_SKILLS_DIR")
@@ -611,4 +615,29 @@ func setupSkillsSystem(
 	}
 
 	return skillsLoader, skillSearchTool, globalSkillsDir, bundledSkillsDir, builtinSkillsDir
+}
+
+// tenantSkillsDirResolver returns the skills-store of the tenant in ctx ("" for the master tenant). The slug
+// comes from ctx, or from the tenant store when ctx has only the id (for example cron and heartbeat runs);
+// looked-up slugs are cached for the process lifetime because a tenant slug does not change.
+func tenantSkillsDirResolver(dataDir string, tenants store.TenantStore) func(ctx context.Context) string {
+	var slugs sync.Map // uuid.UUID -> string
+	return func(ctx context.Context) string {
+		tid := store.TenantIDFromContext(ctx)
+		if tid == uuid.Nil || tid == store.MasterTenantID {
+			return ""
+		}
+		slug := store.TenantSlugFromContext(ctx)
+		if slug == "" {
+			if v, ok := slugs.Load(tid); ok {
+				slug = v.(string)
+			} else if tenants != nil {
+				if t, err := tenants.GetTenant(ctx, tid); err == nil && t != nil && t.Slug != "" {
+					slug = t.Slug
+					slugs.Store(tid, slug)
+				}
+			}
+		}
+		return config.TenantSkillsStoreDir(dataDir, tid, slug)
+	}
 }

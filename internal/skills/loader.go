@@ -54,6 +54,9 @@ type Loader struct {
 	// DB-managed skills directory (set via SetManagedDir).
 	// Uses versioned subdirectory structure: <dir>/<slug>/<version>/SKILL.md
 	managedSkillsDir string
+	// tenantManagedDir returns the skills-store of the tenant in ctx, or "" for the master tenant.
+	// Skills uploaded by a tenant are stored there, not in managedSkillsDir.
+	tenantManagedDir func(ctx context.Context) string
 
 	mu    sync.RWMutex
 	cache map[string]*Info // name → info (lazily populated)
@@ -100,9 +103,29 @@ func (l *Loader) SetManagedDir(dir string) {
 	l.BumpVersion() // trigger re-scan
 }
 
+// SetTenantManagedDir sets how to find the skills-store of the tenant in ctx.
+// Tenant skills are listed before master managed skills, so a tenant upload wins over a master skill with
+// the same slug, and they are never visible to another tenant.
+func (l *Loader) SetTenantManagedDir(fn func(ctx context.Context) string) {
+	l.tenantManagedDir = fn
+	l.BumpVersion()
+}
+
+// tenantDir returns the tenant skills-store for ctx, or "" when there is none.
+func (l *Loader) tenantDir(ctx context.Context) string {
+	if l.tenantManagedDir == nil || ctx == nil {
+		return ""
+	}
+	dir := l.tenantManagedDir(ctx)
+	if dir == "" || dir == l.managedSkillsDir {
+		return ""
+	}
+	return dir
+}
+
 // ListSkills returns all available skills, respecting the priority hierarchy.
 // Higher-priority sources override lower ones by name.
-func (l *Loader) ListSkills(_ context.Context) []Info {
+func (l *Loader) ListSkills(ctx context.Context) []Info {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -156,9 +179,20 @@ func (l *Loader) ListSkills(_ context.Context) []Info {
 		}
 	}
 
+	// Tenant managed skills: listed but not cached, because the cache is shared by every tenant.
+	if dir := l.tenantDir(ctx); dir != "" {
+		for _, info := range listManagedSkills(dir) {
+			if seen[info.Slug] {
+				continue
+			}
+			skills = append(skills, info)
+			seen[info.Slug] = true
+		}
+	}
+
 	// Managed skills (versioned, DB-seeded) come before builtin so their workspace paths win.
 	if l.managedSkillsDir != "" {
-		for _, info := range l.listManagedSkills() {
+		for _, info := range listManagedSkills(l.managedSkillsDir) {
 			if seen[info.Slug] {
 				continue
 			}
@@ -203,11 +237,11 @@ func (l *Loader) ListSkills(_ context.Context) []Info {
 	return skills
 }
 
-// listManagedSkills scans the managed skills directory for versioned skill directories.
-// Structure: <managedSkillsDir>/<slug>/<version>/SKILL.md
+// listManagedSkills scans a managed skills directory for versioned skill directories.
+// Structure: <dir>/<slug>/<version>/SKILL.md
 // Returns the latest version of each skill found.
-func (l *Loader) listManagedSkills() []Info {
-	dirs, err := os.ReadDir(l.managedSkillsDir)
+func listManagedSkills(managedDir string) []Info {
+	dirs, err := os.ReadDir(managedDir)
 	if err != nil {
 		return nil
 	}
@@ -220,7 +254,7 @@ func (l *Loader) listManagedSkills() []Info {
 		slug := d.Name()
 
 		// Find the latest version subdirectory
-		latestVersion, latestDir := l.findLatestVersion(slug)
+		latestVersion, latestDir := findLatestVersion(managedDir, slug)
 		if latestVersion < 0 {
 			continue
 		}
@@ -250,8 +284,8 @@ func (l *Loader) listManagedSkills() []Info {
 
 // findLatestVersion finds the highest-numbered version subdirectory for a skill slug.
 // Returns (version, path) or (-1, "") if no valid version found.
-func (l *Loader) findLatestVersion(slug string) (int, string) {
-	slugDir := filepath.Join(l.managedSkillsDir, slug)
+func findLatestVersion(managedDir, slug string) (int, string) {
+	slugDir := filepath.Join(managedDir, slug)
 	entries, err := os.ReadDir(slugDir)
 	if err != nil {
 		return -1, ""
@@ -280,7 +314,7 @@ func (l *Loader) findLatestVersion(slug string) (int, string) {
 // LoadSkill reads and returns the content of a skill by name (frontmatter stripped).
 // The {baseDir} placeholder in SKILL.md is replaced with the skill's absolute directory path.
 // Priority: workspace > agents > global > managed > builtin
-func (l *Loader) LoadSkill(_ context.Context, name string) (string, bool) {
+func (l *Loader) LoadSkill(ctx context.Context, name string) (string, bool) {
 	// Check flat skill directories (workspace, agents, global) first
 	for _, dir := range []string{l.workspaceSkills, l.projectAgentSkills, l.personalAgentSkills, l.globalSkills} {
 		if dir == "" {
@@ -296,9 +330,13 @@ func (l *Loader) LoadSkill(_ context.Context, name string) (string, bool) {
 		return content, true
 	}
 
-	// Managed skills (DB-seeded, versioned) take priority over raw builtin files.
-	if l.managedSkillsDir != "" {
-		latestVer, latestDir := l.findLatestVersion(name)
+	// Managed skills (DB-seeded, versioned) take priority over raw builtin files; the tenant's own
+	// skills-store comes first.
+	for _, managedDir := range []string{l.tenantDir(ctx), l.managedSkillsDir} {
+		if managedDir == "" {
+			continue
+		}
+		latestVer, latestDir := findLatestVersion(managedDir, name)
 		if latestVer >= 0 {
 			path := filepath.Join(latestDir, "SKILL.md")
 			data, err := os.ReadFile(path)
@@ -465,15 +503,15 @@ func (l *Loader) FilterSkills(ctx context.Context, allowList []string) []Info {
 	return filtered
 }
 
-// GetSkill returns info about a specific skill.
+// GetSkill returns info about a specific skill, as the tenant in ctx sees it.
 func (l *Loader) GetSkill(ctx context.Context, name string) (*Info, bool) {
-	// Ensure cache is populated
-	l.ListSkills(ctx)
-
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	info, ok := l.cache[name]
-	return info, ok
+	for _, info := range l.ListSkills(ctx) {
+		if info.Slug == name || info.Name == name {
+			info := info
+			return &info, true
+		}
+	}
+	return nil, false
 }
 
 // --- Frontmatter parsing ---
