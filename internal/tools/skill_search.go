@@ -101,8 +101,14 @@ func (t *SkillSearchTool) Execute(ctx context.Context, args map[string]any) *Res
 	// Lazy rebuild: check if skills changed since last index build
 	t.ensureIndex(ctx)
 
-	// BM25 search (always available)
-	bm25Results := t.index.Search(query, maxResults*2)
+	// BM25 search (always available). The shared index holds the master tenant's skills only; a tenant
+	// also has its own uploaded skills, so its search uses an index built from its own skill list.
+	index := t.index
+	if tid := store.TenantIDFromContext(ctx); tid != uuid.Nil && tid != store.MasterTenantID {
+		index = skills.NewIndex()
+		index.Build(t.loader.ListSkills(ctx))
+	}
+	bm25Results := index.Search(query, maxResults*2)
 
 	// If embedding searcher is available, run hybrid search
 	var results []skills.SkillSearchResult
