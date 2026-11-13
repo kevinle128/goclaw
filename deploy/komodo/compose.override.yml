@@ -1,0 +1,11 @@
+# Komodo override for the VTC dev server. Komodo runs docker-compose.yml,
+# docker-compose.postgres.yml and docker-compose.otel.yml with this file. It writes
+# the stack environment to the env file at the repository root, which the goclaw
+# service already reads through env_file. The gateway image is built on the server
+# and exists on no registry, so `compose pull` must skip it.
+#
+# The game-db-mcp stack joins the network namespace of goclaw-goclaw-1. After goclaw
+# is recreated, deploy game-db-mcp again.
+services:
+  goclaw:
+    pull_policy: never
