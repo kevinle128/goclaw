@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
+	mcptransport "github.com/mark3labs/mcp-go/client/transport"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/acpbridge"
 )
@@ -127,6 +129,15 @@ func (m *SessionMCPManager) Call(ctx context.Context, registeredName string, arg
 	}
 	result, err := server.client.CallTool(ctx, mcpgo.CallToolRequest{Params: mcpgo.CallToolParams{Name: upstream, Arguments: arguments}})
 	if err != nil {
+		reason, _ := redactSecretValues(err.Error(), server.secrets).(string)
+		var transportErr *mcptransport.Error
+		if ctx.Err() == nil && !errors.As(err, &transportErr) {
+			// The server rejected the call (for example invalid params). Return
+			// its message so the model can correct the arguments and retry.
+			slog.Warn("acp.mcp.tool_rejected", "tool", registeredName, "error", reason)
+			return reason, true, nil
+		}
+		slog.Warn("acp.mcp.tool_call_failed", "tool", registeredName, "error", reason)
 		if ctx.Err() != nil {
 			_ = server.client.Close()
 			server.client = nil
@@ -259,6 +270,7 @@ func (m *SessionMCPManager) startServer(ctx context.Context, cwd string, definit
 		filtered := filteredValue.(map[string]any)
 		input, _ := filtered["inputSchema"].(map[string]any)
 		description, _ := filtered["description"].(string)
+		description = hostToolDescription(description, cwd)
 		server.tools[registered] = tool.Name
 		schemas = append(schemas, acpbridge.ToolSchema{Name: registered, ServerName: definition.Name, ToolName: tool.Name, Description: description, InputSchema: input})
 	}
@@ -482,4 +494,16 @@ func closeLocalMCPServers(servers []*localMCPServer) {
 		}
 		server.mu.Unlock()
 	}
+}
+
+// hostToolDescription tells the model that a client MCP tool runs on the ACP
+// client host. The agent prompt names the gateway workspace, which does not
+// exist on the host, and the model otherwise passes it as a working directory.
+func hostToolDescription(description, cwd string) string {
+	note := "Runs on the ACP client host, not in the agent workspace. Host working directory: " + cwd +
+		". Agent workspace paths do not exist on the host: omit directory arguments or use host paths."
+	if description == "" {
+		return note
+	}
+	return description + "\n\n" + note
 }

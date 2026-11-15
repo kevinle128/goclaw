@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -51,6 +52,53 @@ func TestMCPProcessSurvivesSessionNewContext(t *testing.T) {
 	}
 }
 
+// TestMCPCallReturnsServerRejection checks that a JSON-RPC error from a client
+// MCP server reaches the model as the tool result, so it can fix the arguments,
+// and that tool descriptions name the host working directory.
+func TestMCPCallReturnsServerRejection(t *testing.T) {
+	if os.Getenv("ACP_TEST_MCP_HELPER") == "1" {
+		runMCPTestHelper()
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	manager, err := NewSessionMCPManager(workspace, []string{filepath.Dir(executable)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	tools, err := manager.Start(context.Background(), workspace, []MCPServer{{
+		Name: "helper", Command: executable,
+		Args: []string{"-test.run=^TestMCPCallReturnsServerRejection$"},
+		Env:  []EnvVariable{{Name: "ACP_TEST_MCP_HELPER", Value: "1"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostDir, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(tools[0].Description, "Host working directory: "+hostDir) {
+		t.Fatalf("description = %q, want the host working directory", tools[0].Description)
+	}
+	content, isError, err := manager.Call(context.Background(), tools[0].Name, map[string]any{"command": "echo hi", "workdir": "/app/workspace/tenants/x/ws/system"})
+	if err != nil || !isError || !strings.Contains(content, "workdir does not exist or is not a directory: /app/workspace/tenants/x/ws/system") {
+		t.Fatalf("Call() = %q, %v, %v; want the server rejection as an error result", content, isError, err)
+	}
+	content, isError, err = manager.Call(context.Background(), tools[0].Name, map[string]any{"command": "echo hi"})
+	if err != nil || isError || content == "" {
+		t.Fatalf("Call() after rejection = %q, %v, %v", content, isError, err)
+	}
+}
+
 func runMCPTestHelper() {
 	scanner := bufio.NewScanner(os.Stdin)
 	encoder := json.NewEncoder(os.Stdout)
@@ -58,6 +106,9 @@ func runMCPTestHelper() {
 		var request struct {
 			ID     any    `json:"id"`
 			Method string `json:"method"`
+			Params struct {
+				Arguments map[string]any `json:"arguments"`
+			} `json:"params"`
 		}
 		if json.Unmarshal(scanner.Bytes(), &request) != nil {
 			continue
@@ -69,6 +120,11 @@ func runMCPTestHelper() {
 		case "tools/list":
 			result = map[string]any{"tools": []any{map[string]any{"name": "echo", "description": "echo", "inputSchema": map[string]any{"type": "object"}}}}
 		case "tools/call":
+			if workdir, ok := request.Params.Arguments["workdir"].(string); ok {
+				// Same reply as buzz-dev-mcp for a directory that is not on the host.
+				_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "error": map[string]any{"code": -32602, "message": "workdir does not exist or is not a directory: " + workdir}})
+				continue
+			}
 			result = map[string]any{"content": []any{map[string]string{"type": "text", "text": "ok"}}, "isError": false}
 		default:
 			continue
