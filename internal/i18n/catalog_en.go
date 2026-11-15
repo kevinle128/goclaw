@@ -373,6 +373,7 @@ func init() {
 		MsgACPRequestNotFound:  "ACP request not found or already answered",
 		MsgACPRequestNotOwner:  "ACP request belongs to another connection or run",
 
-		MsgContextTooLong: "This conversation is too long for the model, even after trimming old content. Please start a new thread and repeat your question.",
+		MsgOutputTruncated: "The reply was cut off several times because it was too long, so the request was stopped. Please ask for a shorter or smaller result.",
+		MsgContextTooLong:  "This conversation is too long for the model, even after trimming old content. Please start a new thread and repeat your question.",
 	})
 }

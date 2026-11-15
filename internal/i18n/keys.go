@@ -384,5 +384,6 @@ const (
 	MsgACPRequestNotOwner  = "error.acp_request_not_owner" // "ACP request belongs to another connection or run"
 
 	// --- Agent run ---
-	MsgContextTooLong = "error.context_too_long" // conversation exceeds the model context even after trimming
+	MsgContextTooLong  = "error.context_too_long" // conversation exceeds the model context even after trimming
+	MsgOutputTruncated = "error.output_truncated" // model output was cut off three times in a row
 )

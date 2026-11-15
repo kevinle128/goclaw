@@ -373,6 +373,7 @@ func init() {
 		MsgACPRequestNotFound:  "không tìm thấy yêu cầu ACP hoặc yêu cầu đã được trả lời",
 		MsgACPRequestNotOwner:  "yêu cầu ACP thuộc về kết nối hoặc lượt chạy khác",
 
-		MsgContextTooLong: "Cuộc trò chuyện này quá dài so với giới hạn của mô hình, kể cả sau khi đã rút gọn nội dung cũ. Vui lòng mở thread mới và hỏi lại.",
+		MsgOutputTruncated: "Câu trả lời bị cắt nhiều lần vì quá dài nên yêu cầu đã dừng lại. Vui lòng yêu cầu kết quả ngắn hơn hoặc nhỏ hơn.",
+		MsgContextTooLong:  "Cuộc trò chuyện này quá dài so với giới hạn của mô hình, kể cả sau khi đã rút gọn nội dung cũ. Vui lòng mở thread mới và hỏi lại.",
 	})
 }
