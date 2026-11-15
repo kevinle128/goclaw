@@ -31,6 +31,11 @@ func (s *ThinkStage) Result() StageResult { return s.result }
 func (s *ThinkStage) Execute(ctx context.Context, state *RunState) error {
 	s.result = Continue
 
+	// Emergency compaction returns before a new response is read. Without this
+	// reset, ToolStage would run the previous iteration's tool calls again and
+	// add their results to the context that was just compacted.
+	state.Think.LastResponse = nil
+
 	// 1. Iteration budget nudges (70% / 90%)
 	s.maybeInjectNudge(state)
 
