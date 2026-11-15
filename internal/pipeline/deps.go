@@ -83,6 +83,11 @@ type PipelineDeps struct {
 	// leave it over budget (for example a few huge messages that compaction
 	// cannot split). Optional: nil keeps the abort behavior.
 	FitHistory func(msgs []providers.Message, budget int, model string) ([]providers.Message, FitStats)
+	// FitPending reduces pending tool results to the budget without dropping a
+	// message, so assistant tool_calls and their tool messages stay paired. Used
+	// when pending alone takes more than half of the history budget and no
+	// history fit could make room. Optional: nil keeps the abort behavior.
+	FitPending func(msgs []providers.Message, budget int, model string) ([]providers.Message, FitStats)
 	// OverBudgetMessage returns the user-visible reply used as final content
 	// when the run must stop because history still exceeds the budget. The
 	// callback also delivers it to stream clients. Optional.

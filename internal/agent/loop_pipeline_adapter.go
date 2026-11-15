@@ -135,6 +135,10 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 			placeholder := resolvePruningSettings(l.contextPruningCfg).hardClearPlaceholder
 			return fitHistoryToBudget(msgs, budget, tokenCounter, model, placeholder)
 		},
+		FitPending: func(msgs []providers.Message, budget int, model string) ([]providers.Message, pipeline.FitStats) {
+			placeholder := resolvePruningSettings(l.contextPruningCfg).hardClearPlaceholder
+			return fitPendingToolResults(msgs, budget, tokenCounter, model, placeholder)
+		},
 		OverBudgetMessage: func(ctx context.Context) string {
 			msg := i18n.T(store.LocaleFromContext(ctx), i18n.MsgContextTooLong)
 			// Stream clients (ACP) show only chunk events, and this reply comes

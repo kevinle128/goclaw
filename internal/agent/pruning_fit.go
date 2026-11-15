@@ -38,12 +38,7 @@ func fitHistoryToBudget(msgs []providers.Message, budget int, tc tokencount.Toke
 	}
 	target := budget * fitTargetPercent / 100
 
-	count := func(m providers.Message) int {
-		if tc != nil {
-			return tc.CountMessages(model, []providers.Message{m})
-		}
-		return utf8.RuneCountInString(m.Content)/charsPerTokenEstimate + 4
-	}
+	count := func(m providers.Message) int { return messageTokens(tc, model, m) }
 
 	out := make([]providers.Message, len(msgs))
 	copy(out, msgs)
@@ -128,6 +123,63 @@ func fitHistoryToBudget(msgs []providers.Message, budget int, tc tokencount.Toke
 	}
 
 	out, _ = sanitizeHistory(out)
+	return out, stats
+}
+
+// messageTokens counts one message with the run's counter, or estimates it.
+func messageTokens(tc tokencount.TokenCounter, model string, m providers.Message) int {
+	if tc != nil {
+		return tc.CountMessages(model, []providers.Message{m})
+	}
+	return utf8.RuneCountInString(m.Content)/charsPerTokenEstimate + 4
+}
+
+// fitPendingToolResults reduces the tool results in pending messages to the
+// budget, oldest first: cut to head + tail, then replace by the placeholder.
+// It never drops or reorders a message and never touches an assistant message,
+// so every tool_calls message keeps its paired tool messages. A pending buffer
+// that still exceeds the budget afterwards holds more than tool results; the
+// caller then falls back to its abort path.
+func fitPendingToolResults(msgs []providers.Message, budget int, tc tokencount.TokenCounter, model, placeholder string) ([]providers.Message, pipeline.FitStats) {
+	var stats pipeline.FitStats
+	if budget <= 0 || len(msgs) == 0 {
+		return msgs, stats
+	}
+	out := make([]providers.Message, len(msgs))
+	copy(out, msgs)
+	tokens := make([]int, len(out))
+	total := 0
+	for i, m := range out {
+		tokens[i] = messageTokens(tc, model, m)
+		total += tokens[i]
+	}
+	if total <= budget {
+		return msgs, stats
+	}
+	replace := func(i int, m providers.Message) {
+		out[i] = m
+		n := messageTokens(tc, model, m)
+		total += n - tokens[i]
+		tokens[i] = n
+	}
+	for i := 0; i < len(out) && total > budget; i++ {
+		m := out[i]
+		if m.Role != "tool" || utf8.RuneCountInString(m.Content) <= fitHeadChars+fitTailChars {
+			continue
+		}
+		m.Content = cutMiddle(m.Content, "Tool result trimmed")
+		replace(i, m)
+		stats.ResultsTrimmed++
+	}
+	for i := 0; i < len(out) && total > budget; i++ {
+		m := out[i]
+		if m.Role != "tool" || m.Content == placeholder {
+			continue
+		}
+		m.Content = placeholder
+		replace(i, m)
+		stats.ResultsCleared++
+	}
 	return out, stats
 }
 

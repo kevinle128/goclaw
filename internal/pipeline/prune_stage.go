@@ -220,20 +220,43 @@ func (s *PruneStage) Execute(ctx context.Context, state *RunState) error {
 	return nil
 }
 
-// fitHistory applies the deterministic FitHistory fallback and returns the new
-// history + pending token count. Pending messages stay untouched: they hold the
-// current iteration's assistant(tool_calls) message.
+// fitHistory applies the deterministic fallbacks and returns the new history +
+// pending token count. Pending holds the current iteration's assistant(tool_calls)
+// message and its tool results, so no message is dropped from it. When pending
+// alone takes more than half of the budget, its tool results are trimmed first,
+// because the history fit cannot make room for a pending result that exceeds the
+// whole budget (the run would abort).
 func (s *PruneStage) fitHistory(state *RunState, sessionKey string, budget, historyTokens int) int {
-	if s.deps.FitHistory == nil {
-		return historyTokens
-	}
 	pendingTokens := 0
 	if p := state.Messages.Pending(); len(p) > 0 && s.deps.TokenCounter != nil {
 		pendingTokens = s.deps.TokenCounter.CountMessages(state.Model, p)
 	}
+
+	pendingFitted := false
+	if s.deps.FitPending != nil && pendingTokens > budget/2 {
+		fitted, stats := s.deps.FitPending(state.Messages.Pending(), budget/2, state.Model)
+		state.Messages.ReplacePending(fitted)
+		pendingFitted = true
+		pendingBefore := pendingTokens
+		pendingTokens = s.deps.TokenCounter.CountMessages(state.Model, fitted)
+		state.Prune.HistoryTokens = s.countHistory(state)
+		slog.Info("context.pruned",
+			"session_key", sessionKey,
+			"tokens_before", pendingBefore,
+			"tokens_after", pendingTokens,
+			"trimmed", stats.ResultsTrimmed,
+			"cleared", stats.ResultsCleared,
+			"trigger", "fit_pending",
+		)
+	}
+
+	current := historyTokens
+	if pendingFitted {
+		current = state.Prune.HistoryTokens
+	}
 	historyBudget := budget - pendingTokens
-	if historyBudget <= 0 {
-		return historyTokens
+	if s.deps.FitHistory == nil || historyBudget <= 0 {
+		return current
 	}
 	fitted, stats := s.deps.FitHistory(state.Messages.History(), historyBudget, state.Model)
 	state.Messages.SetHistory(fitted)
@@ -241,7 +264,7 @@ func (s *PruneStage) fitHistory(state *RunState, sessionKey string, budget, hist
 	state.Prune.HistoryTokens = after
 	slog.Info("context.pruned",
 		"session_key", sessionKey,
-		"tokens_before", historyTokens,
+		"tokens_before", current,
 		"tokens_after", after,
 		"trimmed", stats.ResultsTrimmed,
 		"cleared", stats.ResultsCleared,

@@ -41,6 +41,10 @@ func (mb *MessageBuffer) AppendPending(msg providers.Message) {
 	mb.pending = append(mb.pending, msg)
 }
 
+// ReplacePending replaces the pending messages, for example after their tool
+// results were trimmed to fit the context budget.
+func (mb *MessageBuffer) ReplacePending(msgs []providers.Message) { mb.pending = msgs }
+
 // Pending returns pending messages (read-only view).
 func (mb *MessageBuffer) Pending() []providers.Message { return mb.pending }
 
