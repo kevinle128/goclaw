@@ -253,6 +253,32 @@ func (a *AgentData) ParseAllowImageGeneration() bool {
 	return *bag.AllowImageGeneration
 }
 
+// DefaultToolResultMaxTokens is the per-result token threshold above which a
+// tool result is saved to a file and replaced by a preview.
+const DefaultToolResultMaxTokens = 20000
+
+// ParseToolResultMaxTokens returns other_config.tool_result_max_tokens: the
+// token threshold for spilling a tool result. Absent, negative, fractional or
+// non-numeric values give DefaultToolResultMaxTokens; 0 turns the guard off.
+func (a *AgentData) ParseToolResultMaxTokens() int {
+	if len(a.OtherConfig) <= 2 {
+		return DefaultToolResultMaxTokens
+	}
+	var bag map[string]json.RawMessage
+	if json.Unmarshal(a.OtherConfig, &bag) != nil {
+		return DefaultToolResultMaxTokens
+	}
+	raw, ok := bag["tool_result_max_tokens"]
+	if !ok {
+		return DefaultToolResultMaxTokens
+	}
+	var n *float64 // a pointer so JSON null is not read as 0, which would turn the guard off
+	if json.Unmarshal(raw, &n) != nil || n == nil || *n < 0 || *n > 1<<31 || *n != float64(int(*n)) {
+		return DefaultToolResultMaxTokens
+	}
+	return int(*n)
+}
+
 // ParseInboundDebounceMs returns the per-agent inbound debounce override.
 // Missing or malformed config means "inherit global gateway.inbound_debounce_ms".
 func (a *AgentData) ParseInboundDebounceMs() (int, bool) {

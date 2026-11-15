@@ -96,6 +96,9 @@ type ResolverDeps struct {
 	// Persistent media storage for cross-turn image/document access
 	MediaStore *media.Store
 
+	// Spill files for oversized tool results (nil = guard off)
+	ToolResultSpill *tools.ToolResultSpillStore
+
 	// Model pricing for cost tracking
 	ModelPricing map[string]*config.ModelPricing
 
@@ -523,6 +526,8 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			PinnedSkills:           ag.ParsePinnedSkills(),
 			SelfEvolve:             ag.ParseSelfEvolve(),
 			AllowImageGeneration:   ag.ParseAllowImageGeneration(),
+			ToolResultMaxTokens:    ag.ParseToolResultMaxTokens(),
+			ToolResultSpill:        deps.ToolResultSpill,
 			TTSAutoMode:            deps.TTSAutoMode,
 			SkillEvolve:            ag.AgentType == store.AgentTypePredefined && ag.ParseSkillEvolve(),
 			SkillNudgeInterval:     ag.ParseSkillNudgeInterval(),

@@ -165,6 +165,7 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 		RunMemoryFlush: cb.runMemoryFlush,
 
 		// Tool callbacks
+		BoundToolResult:   l.makeBoundToolResult(tokenCounter),
 		ExecuteToolCall:   cb.executeToolCall,
 		ExecuteToolRaw:    cb.executeToolRaw,
 		ProcessToolResult: cb.processToolResult,

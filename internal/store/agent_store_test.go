@@ -460,3 +460,35 @@ func TestParseToolsConfigWaitPolicy(t *testing.T) {
 		t.Fatalf("ToolCallPrefix = %q", got.ToolCallPrefix)
 	}
 }
+
+func TestParseToolResultMaxTokens(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		cfg  string
+		want int
+	}{
+		{"empty config", ``, DefaultToolResultMaxTokens},
+		{"empty object", `{}`, DefaultToolResultMaxTokens},
+		{"absent key", `{"prompt_mode":"full"}`, DefaultToolResultMaxTokens},
+		{"zero turns the guard off", `{"tool_result_max_tokens":0}`, 0},
+		{"positive", `{"tool_result_max_tokens":12000}`, 12000},
+		{"integer written as float", `{"tool_result_max_tokens":12000.0}`, 12000},
+		{"negative", `{"tool_result_max_tokens":-5}`, DefaultToolResultMaxTokens},
+		{"fractional", `{"tool_result_max_tokens":1.5}`, DefaultToolResultMaxTokens},
+		{"string", `{"tool_result_max_tokens":"9000"}`, DefaultToolResultMaxTokens},
+		{"bool", `{"tool_result_max_tokens":true}`, DefaultToolResultMaxTokens},
+		{"null", `{"tool_result_max_tokens":null}`, DefaultToolResultMaxTokens},
+		{"too large", `{"tool_result_max_tokens":1e12}`, DefaultToolResultMaxTokens},
+		{"malformed json", `{"tool_result_max_tokens":`, DefaultToolResultMaxTokens},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := AgentData{OtherConfig: json.RawMessage(tc.cfg)}
+			if got := a.ParseToolResultMaxTokens(); got != tc.want {
+				t.Errorf("ParseToolResultMaxTokens(%q) = %d, want %d", tc.cfg, got, tc.want)
+			}
+		})
+	}
+}

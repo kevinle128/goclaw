@@ -511,6 +511,17 @@ Current adopters: `exec`, `web_search`, `web_fetch`, `tts`, `create_image`, `rea
 | `process_control` | kill -9 of arbitrary PIDs, killall |
 | `env_dump` | env, printenv (full-environment dumps) |
 
+### Tool Result Spill Guard
+
+A tool result above a token threshold is saved to a file and the model sees a bounded preview, so no single result (for example an MCP code search) can overflow the context window. The guard runs in `ToolStage` before a tool message joins the pending buffer, for the sequential and the parallel path.
+
+- Per-agent threshold: `agents.other_config.tool_result_max_tokens`. Absent, negative or malformed gives the default of 20,000 tokens; `0` turns the guard off for that agent. The agent loop reads it when the router rebuilds the cached loop.
+- Above the threshold, the full result is written to `{tool workspace}/.tool-results/session-{hash}/{random}-{tool}.txt` (directories 0700, files 0600, exclusive create). `{hash}` is the SHA-256 of tenant ID and session key. The tool workspace is already tenant-scoped, and a hidden directory stays out of the vault index.
+- The model gets the first 6,000 and last 2,000 characters plus a notice with the relative path. Lines longer than 2,000 characters are wrapped in the file so `read_file` `offset`/`limit` can page a one-line result.
+- `read_file` and its aliases are exempt, so reading a spill file never spills again.
+- A save failure keeps the original result inline and logs `tool_result.spill_failed`. Each spill logs `tool_result.spilled`.
+- Built-in tool caps (`exec`, `web_fetch`, `read_file`) are unchanged.
+
 ---
 
 ## 10. MCP Integration

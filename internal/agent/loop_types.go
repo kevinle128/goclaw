@@ -208,6 +208,11 @@ type Loop struct {
 	// Defaults to true; set false via other_config.allow_image_generation = false.
 	allowImageGeneration bool
 
+	// toolResultMaxTokens / toolResultSpill: oversized tool results go to a file.
+	// Read-only during runs; the spill path is derived per call from the run context.
+	toolResultMaxTokens int
+	toolResultSpill     *tools.ToolResultSpillStore
+
 	// TTS auto mode from config: "off", "always", "inbound", "tagged"
 	ttsAutoMode string
 
@@ -413,6 +418,13 @@ type LoopConfig struct {
 	// Defaults to true; set false to disable image generation for this agent.
 	AllowImageGeneration bool
 
+	// ToolResultMaxTokens is the per-agent threshold above which a tool result is
+	// saved to a file and replaced by a preview (0 = off).
+	ToolResultMaxTokens int
+
+	// ToolResultSpill writes spill files for oversized tool results. nil = guard off.
+	ToolResultSpill *tools.ToolResultSpillStore
+
 	// TTS auto mode from config: "off", "always", "inbound", "tagged"
 	// When "tagged", inject [[tts]] directive guidance into system prompt.
 	TTSAutoMode string
@@ -576,6 +588,8 @@ func NewLoop(cfg LoopConfig) *Loop {
 		pinnedSkills:           cfg.PinnedSkills,
 		selfEvolve:             cfg.SelfEvolve,
 		allowImageGeneration:   cfg.AllowImageGeneration,
+		toolResultMaxTokens:    cfg.ToolResultMaxTokens,
+		toolResultSpill:        cfg.ToolResultSpill,
 		ttsAutoMode:            cfg.TTSAutoMode,
 		skillEvolve:            cfg.SkillEvolve,
 		skillNudgeInterval:     cfg.SkillNudgeInterval,

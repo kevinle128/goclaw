@@ -106,6 +106,10 @@ type PipelineDeps struct {
 	ExecuteToolRaw func(ctx context.Context, tc providers.ToolCall) (providers.Message, any, error)
 	// ProcessToolResult processes a raw tool result with state mutation (sequential only).
 	ProcessToolResult func(ctx context.Context, state *RunState, tc providers.ToolCall, rawMsg providers.Message, rawData any) []providers.Message
+	// BoundToolResult bounds one tool message before ToolStage appends it to the
+	// pending buffer, so an oversized result never reaches the next LLM call.
+	// It is called only for messages with Role == "tool". Optional: nil = no guard.
+	BoundToolResult func(ctx context.Context, state *RunState, tc providers.ToolCall, msg providers.Message) providers.Message
 	// AuthorizeToolCall validates whether a tool call is allowed to execute.
 	// Used by ToolStage as a runtime guard against out-of-policy tool calls.
 	AuthorizeToolCall func(ctx context.Context, state *RunState, tc providers.ToolCall) (bool, string)

@@ -82,9 +82,7 @@ func (s *ToolStage) Execute(ctx context.Context, state *RunState) error {
 		if err != nil {
 			return fmt.Errorf("execute tool %s: %w", tc.Name, err)
 		}
-		for _, msg := range msgs {
-			state.Messages.AppendPending(msg)
-		}
+		s.appendToolMessages(ctx, state, tc, msgs)
 		state.Tool.TotalToolCalls++
 
 		// Hook: async PostToolUse — fire and forget with detached context.
@@ -113,6 +111,19 @@ func (s *ToolStage) Execute(ctx context.Context, state *RunState) error {
 
 	s.checkExitConditions(state)
 	return nil
+}
+
+// appendToolMessages adds the messages one tool call produced to the pending
+// buffer. Tool messages pass through BoundToolResult first: pending is sent to
+// the provider by the next ThinkStage before PruneStage counts it, so this is
+// the last point where an oversized result can be stopped.
+func (s *ToolStage) appendToolMessages(ctx context.Context, state *RunState, tc providers.ToolCall, msgs []providers.Message) {
+	for _, msg := range msgs {
+		if msg.Role == "tool" && s.deps.BoundToolResult != nil {
+			msg = s.deps.BoundToolResult(ctx, state, tc, msg)
+		}
+		state.Messages.AppendPending(msg)
+	}
 }
 
 func (s *ToolStage) requiresSequential(toolCalls []providers.ToolCall) bool {
@@ -297,9 +308,7 @@ func (s *ToolStage) executeParallel(ctx context.Context, state *RunState, prefli
 			return fmt.Errorf("execute tool %s: %w", tc.Name, r.err)
 		}
 		processed := s.deps.ProcessToolResult(ctx, state, tc, r.msg, r.rawData)
-		for _, msg := range processed {
-			state.Messages.AppendPending(msg)
-		}
+		s.appendToolMessages(ctx, state, tc, processed)
 		state.Tool.TotalToolCalls++
 
 		// Hook: async PostToolUse for parallel path — fire and forget.
