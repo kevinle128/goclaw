@@ -121,6 +121,9 @@ func (s *SQLiteSessionStore) SetHistory(ctx context.Context, key string, msgs []
 }
 
 func (s *SQLiteSessionStore) Reset(ctx context.Context, key string) {
+	if s.OnReset != nil {
+		s.OnReset(ctx, key)
+	}
 	s.mu.Lock()
 	if data, ok := s.cache[sessionCacheKey(ctx, key)]; ok {
 		data.Messages = []providers.Message{}
@@ -148,7 +151,7 @@ func (s *SQLiteSessionStore) Delete(ctx context.Context, key string) error {
 	s.mu.Unlock()
 
 	if s.OnDelete != nil {
-		s.OnDelete(key)
+		s.OnDelete(ctx, key)
 	}
 
 	tid := tenantIDForInsert(ctx)

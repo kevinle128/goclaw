@@ -445,6 +445,27 @@ type ToolsConfig struct {
 	ScrubCredentials        *bool                         `json:"scrub_credentials,omitempty"`   // auto-redact API keys/tokens in tool output (default true)
 	McpServers              map[string]*MCPServerConfig   `json:"mcp_servers,omitempty"`         // external MCP server connections
 	DocumentParser          DocumentParserConfig          `json:"document_parser"`               // local-first document text extraction
+	ToolResultSpill         *ToolResultSpillConfig        `json:"toolResultSpill,omitempty"`     // retention of spilled oversized tool results
+}
+
+// DefaultToolResultSpillRetentionDays is how long spill files of oversized
+// tool results live when a session is never deleted.
+const DefaultToolResultSpillRetentionDays = 7
+
+// ToolResultSpillConfig controls the age sweep of spilled tool results.
+// Spill files also go away when their session is deleted or reset.
+type ToolResultSpillConfig struct {
+	// RetentionDays: absent or negative = 7 days, 0 = never sweep by age.
+	RetentionDays *int `json:"retentionDays,omitempty"`
+}
+
+// EffectiveRetentionDays returns the age in days after which a spill file is
+// swept, or 0 when the age sweep is off. It is safe to call on a nil receiver.
+func (c *ToolResultSpillConfig) EffectiveRetentionDays() int {
+	if c != nil && c.RetentionDays != nil && *c.RetentionDays >= 0 {
+		return *c.RetentionDays
+	}
+	return DefaultToolResultSpillRetentionDays
 }
 
 // DocumentParserConfig controls local-first document text extraction in the

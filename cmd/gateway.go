@@ -642,6 +642,7 @@ func runGateway() {
 	defer cancel()
 
 	server.StartUpdateChecker(ctx)
+	go toolResultSpill.RunSweeper(ctx, cfg.Tools.ToolResultSpill.EffectiveRetentionDays())
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

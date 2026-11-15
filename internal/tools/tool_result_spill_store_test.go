@@ -1,12 +1,16 @@
 package tools
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
 func TestSpillStore_ExclusiveCreateRefusesPlantedSymlink(t *testing.T) {
@@ -117,5 +121,125 @@ func TestWrapLongLines_KeepsShortContentAndInsertsOnlyNewlines(t *testing.T) {
 	}
 	if want := 3 + 1 + 1; len(strings.Split(got, "\n")) != want {
 		t.Errorf("lines = %d, want %d (4500 runes -> 3 lines; 2000 runes stays 1 line)", len(strings.Split(got, "\n")), want)
+	}
+}
+
+func spillFile(t *testing.T, s *ToolResultSpillStore, workspace string, tenant uuid.UUID, key string) string {
+	t.Helper()
+	res, err := s.Save(workspace, tenant, key, "exec", "data of "+key)
+	if err != nil {
+		t.Fatalf("Save(%s): %v", key, err)
+	}
+	return filepath.Join(workspace, filepath.FromSlash(res.RelPath))
+}
+
+func TestSpillStore_DeleteSessionRemovesDirAndIndex(t *testing.T) {
+	workspace, dataDir := t.TempDir(), t.TempDir()
+	s := NewToolResultSpillStore(dataDir)
+	tenantA, tenantB := uuid.New(), uuid.New()
+
+	a1 := spillFile(t, s, workspace, tenantA, "k")
+	a2 := spillFile(t, s, workspace, tenantA, "k")
+	b := spillFile(t, s, workspace, tenantB, "k")
+
+	ctx := store.WithTenantID(context.Background(), tenantA)
+	if got := s.DeleteSession(ctx, "k"); got != 1 {
+		t.Errorf("DeleteSession() = %d directories, want 1", got)
+	}
+	for _, f := range []string{a1, a2} {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Errorf("%s still exists (err=%v)", f, err)
+		}
+	}
+	if _, err := os.Stat(s.indexPath(ToolResultSessionHash(tenantA, "k"))); !os.IsNotExist(err) {
+		t.Errorf("index file still exists (err=%v)", err)
+	}
+	if _, err := os.Stat(b); err != nil {
+		t.Errorf("the same key in another tenant lost its file: %v", err)
+	}
+	if got := s.DeleteSession(ctx, "k"); got != 0 {
+		t.Errorf("second DeleteSession() = %d, want 0", got)
+	}
+}
+
+func TestSpillStore_DeleteSessionIgnoresForeignIndexEntries(t *testing.T) {
+	workspace, dataDir := t.TempDir(), t.TempDir()
+	s := NewToolResultSpillStore(dataDir)
+	tenant := uuid.New()
+	hash := ToolResultSessionHash(tenant, "k")
+	victim := filepath.Join(t.TempDir(), "important")
+	if err := os.MkdirAll(victim, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A tampered index lists a directory that is not a session spill directory.
+	if err := os.MkdirAll(filepath.Join(dataDir, toolResultIndexDirName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.indexPath(hash), []byte(victim+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spillFile(t, s, workspace, tenant, "k")
+
+	s.DeleteSession(store.WithTenantID(context.Background(), tenant), "k")
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("a foreign directory from the index was removed: %v", err)
+	}
+}
+
+func TestSpillStore_SweepRemovesOnlyOldFiles(t *testing.T) {
+	workspace, dataDir := t.TempDir(), t.TempDir()
+	s := NewToolResultSpillStore(dataDir)
+	tenant := uuid.New()
+	now := time.Now()
+	age := func(path string, d time.Duration) {
+		t.Helper()
+		if err := os.Chtimes(path, now.Add(-d), now.Add(-d)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const day = 24 * time.Hour
+
+	// Session "mixed": one old file and one recent file. Session "old": only old files.
+	oldMixed := spillFile(t, s, workspace, tenant, "mixed")
+	newMixed := spillFile(t, s, workspace, tenant, "mixed")
+	old1 := spillFile(t, s, workspace, tenant, "old")
+	old2 := spillFile(t, s, workspace, tenant, "old")
+	age(oldMixed, 8*day)
+	age(newMixed, 6*day)
+	age(old1, 9*day)
+	age(old2, 8*day)
+
+	if st := s.Sweep(0, now); st.FilesRemoved != 0 || st.DirsRemoved != 0 {
+		t.Errorf("Sweep(0) removed %+v, want nothing", st)
+	}
+	st := s.Sweep(7*day, now)
+	if st.FilesRemoved != 3 || st.DirsRemoved != 1 {
+		t.Errorf("Sweep(7d) = %+v, want 3 files and 1 directory removed", st)
+	}
+	if _, err := os.Stat(newMixed); err != nil {
+		t.Errorf("6-day-old file was removed: %v", err)
+	}
+	for _, f := range []string{oldMixed, old1, old2} {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Errorf("%s older than 7 days still exists", f)
+		}
+	}
+	if _, err := os.Stat(filepath.Dir(old1)); !os.IsNotExist(err) {
+		t.Error("empty session directory was not removed")
+	}
+	if _, err := os.Stat(s.indexPath(ToolResultSessionHash(tenant, "old"))); !os.IsNotExist(err) {
+		t.Error("index entry of the removed session directory is still there")
+	}
+	if lines, _ := readIndexLines(s.indexPath(ToolResultSessionHash(tenant, "mixed"))); len(lines) != 1 {
+		t.Errorf("index of the kept session = %v, want one entry", lines)
+	}
+
+	// A new save in a swept session records its directory again.
+	again := spillFile(t, s, workspace, tenant, "old")
+	if _, err := os.Stat(again); err != nil {
+		t.Fatal(err)
+	}
+	if lines, _ := readIndexLines(s.indexPath(ToolResultSessionHash(tenant, "old"))); len(lines) != 1 {
+		t.Errorf("index after a new save = %v, want one entry", lines)
 	}
 }

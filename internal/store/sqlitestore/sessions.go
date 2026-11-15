@@ -23,8 +23,15 @@ type SQLiteSessionStore struct {
 	db    *sql.DB
 	mu    sync.RWMutex
 	cache map[string]*store.SessionData
-	// OnDelete is called with the session key when a session is deleted.
-	OnDelete func(sessionKey string)
+	// OnDelete is called when a session is deleted, before its row is removed.
+	OnDelete func(ctx context.Context, sessionKey string)
+	// OnReset is called when a session's history is cleared.
+	OnReset func(ctx context.Context, sessionKey string)
+}
+
+// SetSessionHooks implements store.SessionLifecycleHooks.
+func (s *SQLiteSessionStore) SetSessionHooks(onDelete, onReset func(ctx context.Context, sessionKey string)) {
+	s.OnDelete, s.OnReset = onDelete, onReset
 }
 
 func NewSQLiteSessionStore(db *sql.DB) *SQLiteSessionStore {

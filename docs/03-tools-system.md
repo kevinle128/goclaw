@@ -520,6 +520,8 @@ A tool result above a token threshold is saved to a file and the model sees a bo
 - The model gets the first 6,000 and last 2,000 characters plus a notice with the relative path. Lines longer than 2,000 characters are wrapped in the file so `read_file` `offset`/`limit` can page a one-line result.
 - `read_file` and its aliases are exempt, so reading a spill file never spills again.
 - A save failure keeps the original result inline and logs `tool_result.spill_failed`. Each spill logs `tool_result.spilled`.
+- Retention: spill files belong to their session. `sessions.delete` and `sessions.reset` (and the `/reset` chat command and the isolated heartbeat session cleanup, which call the same session store methods) remove the session's spill directory. Directories are tracked in `{data_dir}/tool-results-index/{hash}`, which `exec` cannot read.
+- Age sweep for sessions that end without a delete: `config.tools.toolResultSpill.retentionDays` (default 7, `0` = no sweep). It runs at gateway start and every 24 hours, removes spill files older than the retention and empty session directories.
 - Built-in tool caps (`exec`, `web_fetch`, `read_file`) are unchanged.
 
 ---

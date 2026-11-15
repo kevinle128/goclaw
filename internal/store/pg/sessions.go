@@ -22,9 +22,17 @@ type PGSessionStore struct {
 	mu sync.RWMutex
 	// In-memory cache for hot sessions (reduces DB reads during tool loops)
 	cache map[string]*store.SessionData
-	// OnDelete is called with the session key when a session is deleted.
-	// Used for media file cleanup.
-	OnDelete func(sessionKey string)
+	// OnDelete is called when a session is deleted, before its row is removed.
+	// Used for media and tool-result spill file cleanup.
+	OnDelete func(ctx context.Context, sessionKey string)
+	// OnReset is called when a session's history is cleared. Used for
+	// tool-result spill file cleanup.
+	OnReset func(ctx context.Context, sessionKey string)
+}
+
+// SetSessionHooks implements store.SessionLifecycleHooks.
+func (s *PGSessionStore) SetSessionHooks(onDelete, onReset func(ctx context.Context, sessionKey string)) {
+	s.OnDelete, s.OnReset = onDelete, onReset
 }
 
 func NewPGSessionStore(db *sql.DB) *PGSessionStore {

@@ -29,7 +29,6 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/sandbox"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
-	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/internal/tracing"
 	usagecaps "github.com/nextlevelbuilder/goclaw/internal/usage/caps"
@@ -78,13 +77,22 @@ func wireExtras(
 		slog.Warn("media store creation failed, images will not persist across turns", "error", err)
 	}
 
-	// Wire media cleanup on session delete.
+	// Wire file cleanup on session delete (media, spilled tool results) and on
+	// reset (spilled tool results). Both session stores take the same hooks.
+	if hooked, ok := sessStore.(store.SessionLifecycleHooks); ok {
+		hooked.SetSessionHooks(
+			func(ctx context.Context, sessionKey string) {
+				if mediaStore != nil {
+					_ = mediaStore.DeleteSession(sessionKey)
+				}
+				toolResultSpill.DeleteSession(ctx, sessionKey)
+			},
+			func(ctx context.Context, sessionKey string) {
+				toolResultSpill.DeleteSession(ctx, sessionKey)
+			},
+		)
+	}
 	if mediaStore != nil {
-		if pgSess, ok := sessStore.(*pg.PGSessionStore); ok {
-			pgSess.OnDelete = func(sessionKey string) {
-				_ = mediaStore.DeleteSession(sessionKey)
-			}
-		}
 		// Register media analysis tools (need mediaStore for file access).
 		readDocumentTool := tools.NewReadDocumentTool(providerReg, mediaStore)
 		readDocumentTool.SetUsageCapService(usageCapSvc)

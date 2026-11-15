@@ -120,6 +120,14 @@ type SessionCoreStore interface {
 	Save(ctx context.Context, key string) error
 }
 
+// SessionLifecycleHooks is implemented by session stores that report when a
+// session is deleted or reset, so files that belong to the session (media,
+// spilled tool results) can be removed with it. The context carries the tenant.
+// Set the hooks at startup, before the store serves requests.
+type SessionLifecycleHooks interface {
+	SetSessionHooks(onDelete, onReset func(ctx context.Context, sessionKey string))
+}
+
 // SessionBranchStore is implemented by durable stores that can clone a session
 // into a new branch key without overwriting an existing target.
 type SessionBranchStore interface {
