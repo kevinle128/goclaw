@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/acpbridge"
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
@@ -129,6 +130,7 @@ func processSubagentAnnounceLoop(
 	sched *scheduler.Scheduler,
 	msgBus *bus.MessageBus,
 	cfg *config.Config,
+	acpWaker *acpbridge.ResultWaker,
 ) {
 	// Ensure tenant scope is always set for the scheduler.
 	if r.TenantID != uuid.Nil {
@@ -189,8 +191,22 @@ func processSubagentAnnounceLoop(
 			ParentRootSpanID: r.ParentRootSpanID,
 		}
 
-		outCh := sched.Schedule(ctx, scheduler.LaneSubagent, req)
+		// A session of an ACP client gets no response text in its chat; mark
+		// the run so the message tool does not claim otherwise.
+		runCtx := ctx
+		if _, isACP := acpWaker.Origin(r.SessionKey); isACP {
+			runCtx = tools.WithACPSession(ctx)
+		}
+		outCh := sched.Schedule(runCtx, scheduler.LaneSubagent, req)
 		outcome := <-outCh
+
+		// The wake goes after the run ended: a wake during the run would be
+		// injected into this run, which has no host tools.
+		if deliverAnnounceToACPThread(ctx, acpWaker, r, entries, outcome) {
+			slog.Info("subagent announce: batch delivered by ACP wake",
+				"batch_size", len(entries), "session", r.SessionKey)
+			continue
+		}
 
 		if outcome.Err != nil {
 			if !errors.Is(outcome.Err, context.Canceled) {

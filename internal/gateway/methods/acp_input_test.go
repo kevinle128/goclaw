@@ -11,6 +11,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
 	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
+	"github.com/nextlevelbuilder/goclaw/internal/tools"
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
@@ -120,5 +121,31 @@ func TestChatSendParamsAcceptACPClientAndOlderShapes(t *testing.T) {
 	var older chatSendParams
 	if err := json.Unmarshal([]byte(`{"message":"hi","acpGeneration":3,"terminalMode":"metadata"}`), &older); err != nil || older.ACPClient != nil {
 		t.Fatalf("older params = %+v, %v", older, err)
+	}
+}
+
+func TestChatACPRunContextRemembersSessionOrigin(t *testing.T) {
+	origins := acpbridge.NewSessionOrigins()
+	m := &ChatMethods{origins: origins}
+	tenant := uuid.New()
+	client := gateway.NewTestClient(permissions.RoleOperator, tenant, "user-1")
+	primary := chatSendRequest{client: client, ownerConnectionID: client.ID(), sessionKey: "agent:a:ws:direct:s", userID: "user-1"}
+	thread := json.RawMessage(`{"channelId":"c1","rootEventId":"e1"}`)
+	params := chatSendParams{ACPGeneration: 2, ACPClient: &chatACPClient{Wake: true, Thread: thread, ACPSessionID: "acp-1"}}
+
+	ctx := m.acpRunContext(context.Background(), primary, params)
+	if !tools.IsACPSessionFromCtx(ctx) {
+		t.Fatal("ACP run is not marked as an ACP session")
+	}
+	origin, ok := origins.Lookup(primary.sessionKey)
+	if !ok || !origin.Wake || origin.UserID != "user-1" || origin.TenantID != tenant || origin.ACPSessionID != "acp-1" || string(origin.Thread) != string(thread) {
+		t.Fatalf("origin = %+v, %v", origin, ok)
+	}
+
+	// A client without wake support is still an ACP session, but cannot be woken.
+	params.ACPClient.Wake = false
+	m.acpRunContext(context.Background(), primary, params)
+	if origin, _ := origins.Lookup(primary.sessionKey); origin.Wake {
+		t.Fatal("origin must not claim wake support")
 	}
 }

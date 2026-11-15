@@ -393,6 +393,7 @@ func runGateway() {
 		domainBus:        domainBus,
 		usageCapSvc:      usageCapSvc,
 		audioMgr:         audioMgr,
+		acpResultWaker:   acpRelay.resultWaker,
 	}
 
 	gatewayAddr := loopbackAddr(cfg.Gateway.Host, cfg.Gateway.Port)

@@ -77,6 +77,10 @@ func (t *MessageTool) Parameters() map[string]any {
 	}
 }
 
+// acpSelfSendMessage is the self-send refusal for an ACP client session. The
+// response text of such a run does not reach the client's chat on its own.
+const acpSelfSendMessage = "This chat belongs to an ACP client (for example Buzz). The message tool cannot post to it, and your response text is not posted to the chat automatically. In a prompt turn, post with the client's own host tool (for example buzz messages send). In a background run that has no such tool, write the final summary as your response text: goclaw then wakes you in the thread so that you can post it."
+
 func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result {
 	action := argString(args, "action")
 	if action != "send" {
@@ -116,6 +120,9 @@ func (t *MessageTool) Execute(ctx context.Context, args map[string]any) *Result 
 	if isSelfSend {
 		isMediaSend := embeddedMediaPattern.MatchString(message)
 		if !isMediaSend {
+			if IsACPSessionFromCtx(ctx) {
+				return ErrorResult(acpSelfSendMessage)
+			}
 			return ErrorResult("You are already responding to this chat. Your response text will be delivered automatically. Do not use the message tool to send text to your own chat — just include the content in your response text. To deliver files, use write_file with deliver=true instead.")
 		}
 		// MEDIA self-send: block if ALL referenced files are already queued for delivery.

@@ -40,6 +40,7 @@ type ChatMethods struct {
 	debouncer   *chatDebouncer
 	acpManager  *acpbridge.Manager
 	inputRelays *acpbridge.InputRelays
+	origins     *acpbridge.SessionOrigins
 }
 
 func NewChatMethods(agents *agent.Router, sess store.SessionStore, cfg *config.Config, rl *gateway.RateLimiter, eventBus bus.EventPublisher) *ChatMethods {
@@ -66,6 +67,10 @@ func (m *ChatMethods) SetACPManager(manager *acpbridge.Manager) { m.acpManager =
 
 // SetACPInputRelays sets the registry of in-turn input requests of ACP runs.
 func (m *ChatMethods) SetACPInputRelays(relays *acpbridge.InputRelays) { m.inputRelays = relays }
+
+// SetACPSessionOrigins sets the registry that remembers the ACP client behind
+// each session key, so background runs can wake the thread of the client.
+func (m *ChatMethods) SetACPSessionOrigins(origins *acpbridge.SessionOrigins) { m.origins = origins }
 
 func (m *ChatMethods) DiscardACPConnection(connectionID string) {
 	if m.debouncer == nil {
@@ -710,6 +715,19 @@ func (m *ChatMethods) acpRunContext(ctx context.Context, primary chatSendRequest
 	if acpClient == nil || params.ACPGeneration == 0 || primary.ownerConnectionID == "" || primary.client == nil {
 		return ctx
 	}
+	ctx = tools.WithACPSession(ctx)
+	var agentUUID uuid.UUID
+	if primary.loop != nil {
+		agentUUID = primary.loop.UUID()
+	}
+	m.origins.Remember(primary.sessionKey, acpbridge.SessionOrigin{
+		TenantID:     primary.client.TenantID(),
+		AgentID:      agentUUID,
+		UserID:       primary.userID,
+		ACPSessionID: acpClient.ACPSessionID,
+		Thread:       acpClient.Thread,
+		Wake:         acpClient.Wake,
+	})
 	// Only a client that accepts wake requests gets an ACP origin. Without it
 	// no wake can reach the thread, so the task must not promise one.
 	if acpClient.Wake {

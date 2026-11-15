@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"github.com/nextlevelbuilder/goclaw/internal/acpbridge"
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/audio"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
@@ -37,6 +38,7 @@ type gatewayDeps struct {
 	dataDir          string
 	domainBus        eventbus.DomainEventBus
 	usageCapSvc      *usagecaps.Service
-	audioMgr         *audio.Manager      // nil if TTS not configured; used by TTSHandler
-	ttsHandler       *httpapi.TTSHandler // nil if TTS not configured; for hot-reload
+	audioMgr         *audio.Manager         // nil if TTS not configured; used by TTSHandler
+	ttsHandler       *httpapi.TTSHandler    // nil if TTS not configured; for hot-reload
+	acpResultWaker   *acpbridge.ResultWaker // wakes ACP client threads with sub-agent results
 }

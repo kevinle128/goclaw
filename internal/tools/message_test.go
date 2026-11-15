@@ -862,3 +862,25 @@ func TestMessageTargetEnforced(t *testing.T) {
 		}
 	}
 }
+
+func TestSelfSendGuardACPSession(t *testing.T) {
+	tool := NewMessageTool(t.TempDir(), true)
+	args := map[string]any{"action": "send", "channel": "ws", "target": "chat-1", "message": "summary"}
+	base := WithToolChatID(WithToolChannel(context.Background(), "ws"), "chat-1")
+
+	plain := tool.Execute(base, args)
+	if !plain.IsError || !strings.Contains(plain.ForLLM, "delivered automatically") {
+		t.Fatalf("plain session keeps the auto-delivery text, got %q", plain.ForLLM)
+	}
+
+	acp := tool.Execute(WithACPSession(base), args)
+	if !acp.IsError {
+		t.Fatal("ACP session self-send must stay blocked")
+	}
+	if strings.Contains(acp.ForLLM, "delivered automatically") {
+		t.Fatalf("ACP session must not be told that text is delivered automatically: %q", acp.ForLLM)
+	}
+	if !strings.Contains(acp.ForLLM, "buzz messages send") {
+		t.Fatalf("ACP refusal must point to the host tool: %q", acp.ForLLM)
+	}
+}

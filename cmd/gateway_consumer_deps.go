@@ -3,6 +3,7 @@ package cmd
 import (
 	"sync"
 
+	"github.com/nextlevelbuilder/goclaw/internal/acpbridge"
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
@@ -34,4 +35,6 @@ type ConsumerDeps struct {
 	ProviderReg      *providers.Registry
 	BgWg             sync.WaitGroup
 	GetAnnounceMu    func(string) *sync.Mutex
+	// ACPResultWaker wakes the thread of an ACP client with a sub-agent result. Nil without ACP.
+	ACPResultWaker *acpbridge.ResultWaker
 }
