@@ -462,7 +462,13 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 		}
 
 		resp, err := callProvider("initial", chatReq)
+		hashes := computePromptHashes(chatReq.Messages, chatReq.Tools)
 		slog.Info("debug.llm.first_response",
+			"iteration", state.Iteration,
+			"system_stable_hash", hashes.SystemStable,
+			"system_dynamic_hash", hashes.SystemDynamic,
+			"tools_hash", hashes.Tools,
+			"tools_names_hash", hashes.ToolNames,
 			"has_error", err != nil,
 			"tool_calls_count", func() int {
 				if resp == nil {
