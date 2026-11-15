@@ -293,8 +293,20 @@ func (t *ReadFileTool) paginateOutput(content string, args map[string]any) *Resu
 			break
 		}
 	}
+	if truncIdx < 1 && len([]rune(sliced[0])) <= readFileMaxChars {
+		truncIdx = 1 // the first line fits; only its newline pushed the count over
+	}
 	if truncIdx < 1 {
-		truncIdx = 1
+		// The first line alone exceeds the cap (for example a compact JSON
+		// result on one line). Returning it whole would defeat the cap, so
+		// return its head and say how to read the rest.
+		runes := []rune(sliced[0])
+		note := fmt.Sprintf("\n\n[Line %d is %d chars; showed the first %d. Use exec with a byte range (for example: cut -c %d-%d) to read more.",
+			offset, len(runes), readFileMaxChars, readFileMaxChars+1, 2*readFileMaxChars)
+		if len(sliced) > 1 || endLine < totalLines {
+			note += fmt.Sprintf(" Use offset=%d to continue with the next line.", offset+1)
+		}
+		return SilentResult(string(runes[:readFileMaxChars]) + note + "]")
 	}
 
 	output = strings.Join(sliced[:truncIdx], "\n")
