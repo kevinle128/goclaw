@@ -27,7 +27,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
-// ChatMethods handles chat.send, chat.history, chat.abort, chat.inject.
+// ChatMethods handles chat.send, chat.history, chat.abort, chat.inject, chat.steer.
 type ChatMethods struct {
 	agents      *agent.Router
 	sessions    store.SessionStore
@@ -82,6 +82,7 @@ func (m *ChatMethods) Register(router *gateway.MethodRouter) {
 	router.Register(protocol.MethodChatHistory, m.handleHistory)
 	router.Register(protocol.MethodChatAbort, m.handleAbort)
 	router.Register(protocol.MethodChatInject, m.handleInject)
+	router.Register(protocol.MethodChatSteer, m.handleSteer)
 	router.Register(protocol.MethodChatSessionStatus, m.handleSessionStatus)
 }
 

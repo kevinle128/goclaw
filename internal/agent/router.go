@@ -441,23 +441,44 @@ func (r *Router) AbortRunsForSession(sessionKey string) []AbortResult {
 	return results
 }
 
+// Reasons a message could not be injected into a running loop.
+const (
+	InjectReasonNoActiveRun = "no_active_run"
+	InjectReasonFull        = "inject_full"
+)
+
+// InjectOutcome tells whether an injected message reached the running loop.
+type InjectOutcome struct {
+	Injected bool
+	// RunID is the run that accepted the message; empty when none did.
+	RunID string
+	// Reason is set when Injected is false (an InjectReason* value).
+	Reason string
+}
+
 // InjectMessage sends a user message to the running loop for a session.
 // Returns true if the message was accepted, false if no active run or channel full.
 func (r *Router) InjectMessage(sessionKey string, msg InjectedMessage) bool {
+	return r.InjectMessageDetailed(sessionKey, msg).Injected
+}
+
+// InjectMessageDetailed is InjectMessage with the accepting run id and, on
+// failure, the reason. It never starts a run.
+func (r *Router) InjectMessageDetailed(sessionKey string, msg InjectedMessage) InjectOutcome {
 	runIDVal, ok := r.sessionRuns.Load(sessionKey)
 	if !ok {
-		return false
+		return InjectOutcome{Reason: InjectReasonNoActiveRun}
 	}
 	runVal, ok := r.activeRuns.Load(runIDVal)
 	if !ok {
-		return false
+		return InjectOutcome{Reason: InjectReasonNoActiveRun}
 	}
 	run := runVal.(*ActiveRun)
 	select {
 	case run.InjectCh <- msg:
-		return true
+		return InjectOutcome{Injected: true, RunID: run.RunID}
 	default:
-		return false // channel full
+		return InjectOutcome{RunID: run.RunID, Reason: InjectReasonFull}
 	}
 }
 

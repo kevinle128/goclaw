@@ -149,6 +149,13 @@ Inject a message into the session transcript without triggering the agent.
 **Request:** `{sessionKey, message, label}`
 **Response:** `{ok: true, messageId: "..."}`
 
+### `chat.steer`
+
+Put a message into the run that is active on a session. It never starts a run and never waits for the loop to read the message: it answers as soon as the message is queued. The loop reads it after the current tool batch and adds it as a `user` message after the tool results (or after the final answer, which then continues in the same run). Used by the ACP server for `_session/steering`.
+
+**Request:** `{sessionKey, message}` (both required; the caller must own the session)
+**Response:** `{injected: true, runId: "..."}` or `{injected: false, reason: "no_active_run" | "inject_full"}`
+
 ### `chat.session.status`
 
 Check if a session has a running agent invocation.
@@ -838,7 +845,7 @@ Methods are gated by role. The role is determined at `connect` time from the tok
 
 ### Write Methods (Operator+)
 
-`chat.send`, `chat.abort`, `chat.inject`, `sessions.delete`, `sessions.reset`, `sessions.patch`, `cron.*`, `skills.update`, `exec.approval.*`, `send`, `teams.tasks.*`
+`chat.send`, `chat.abort`, `chat.inject`, `chat.steer`, `sessions.delete`, `sessions.reset`, `sessions.patch`, `cron.*`, `skills.update`, `exec.approval.*`, `send`, `teams.tasks.*`
 
 ### Read Methods (Viewer+)
 

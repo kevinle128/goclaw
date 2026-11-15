@@ -27,6 +27,7 @@ The first request must be a `connect` handshake. Authentication supports three p
 | `chat.send` | Send a message to an agent |
 | `chat.history` | Retrieve session history |
 | `chat.abort` | Abort a running agent request |
+| `chat.steer` | Inject a message into the active run of a session (never starts a run) |
 | `agent` | Get agent info |
 | `sessions.list` | List active sessions |
 | `sessions.delete` | Delete a session |
