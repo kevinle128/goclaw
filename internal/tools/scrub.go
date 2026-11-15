@@ -33,8 +33,61 @@ var credentialPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(DSN|DATABASE_URL|REDIS_URL|MONGO_URI)\s*=\s*[^\[\s]{8,}`),
 	// VIRTUAL_* env vars (internal runtime config, should not leak)
 	regexp.MustCompile(`(?i)VIRTUAL_[A-Z_]+\s*=\s*[^\[\s]{4,}`),
-	// Long hex strings (64+ chars) — likely encryption keys, hashes, or secrets
-	regexp.MustCompile(`[a-fA-F0-9]{64,}`),
+}
+
+// longHexPattern matches hex runs of 64+ chars — likely encryption keys, hashes
+// or secrets. It runs separately from credentialPatterns so that Nostr ids can
+// be kept visible (see scrubLongHex).
+var longHexPattern = regexp.MustCompile(`[a-fA-F0-9]{64,}`)
+
+// Nostr event ids and pubkeys are exactly 64 hex chars, so the long-hex rule
+// would hide every id a chat CLI returns and the agent could no longer reply
+// to or react to a message. A 64-hex value is kept only when it is the value
+// of a known id-like key, an entry of mention_pubkeys, or the second element
+// of an "e"/"p" tag. Every quote may be preceded by backslashes, so the same
+// rules work when the JSON is nested inside a string of another JSON document.
+var (
+	nostrIDKeyPattern = regexp.MustCompile(
+		`\\*"(?:event_id|id|pubkey|reply_to|reply_to_id|thread_root|root|root_id|parent_id|author|author_pubkey)\\*"\s*:\s*\\*"([a-fA-F0-9]{64})\\*"`)
+	nostrMentionPattern = regexp.MustCompile(
+		`\\*"mention_pubkeys\\*"\s*:\s*\[([^\]]*)\]`)
+	nostrTagPattern = regexp.MustCompile(
+		`\[\s*\\*"[ep]\\*"\s*,\s*\\*"([a-fA-F0-9]{64})\\*"`)
+)
+
+// scrubLongHex redacts 64+ char hex runs except Nostr ids in the positions
+// described above.
+func scrubLongHex(text string) string {
+	runs := longHexPattern.FindAllStringIndex(text, -1)
+	if len(runs) == 0 {
+		return text
+	}
+	keep := make(map[int]struct{})
+	for _, m := range nostrIDKeyPattern.FindAllStringSubmatchIndex(text, -1) {
+		keep[m[2]] = struct{}{}
+	}
+	for _, m := range nostrTagPattern.FindAllStringSubmatchIndex(text, -1) {
+		keep[m[2]] = struct{}{}
+	}
+	for _, m := range nostrMentionPattern.FindAllStringSubmatchIndex(text, -1) {
+		for _, r := range longHexPattern.FindAllStringIndex(text[m[2]:m[3]], -1) {
+			keep[m[2]+r[0]] = struct{}{}
+		}
+	}
+	var b strings.Builder
+	last := 0
+	for _, r := range runs {
+		// Only an exact 64-char run can be an id; the key patterns already
+		// require exactly 64 hex between the quotes, the mention list does not.
+		if _, ok := keep[r[0]]; ok && r[1]-r[0] == 64 {
+			continue
+		}
+		b.WriteString(text[last:r[0]])
+		b.WriteString(redactedPlaceholder)
+		last = r[1]
+	}
+	b.WriteString(text[last:])
+	return b.String()
 }
 
 const redactedPlaceholder = "[REDACTED]"
@@ -179,6 +232,7 @@ func ScrubCredentialsCtx(ctx context.Context, text string) string {
 	for _, pat := range credentialPatterns {
 		text = pat.ReplaceAllString(text, redactedPlaceholder)
 	}
+	text = scrubLongHex(text)
 	if bag, ok := ctx.Value(scrubBagKey{}).(*scrubBag); ok {
 		bag.mu.RLock()
 		vals := append([]string(nil), bag.values...)
@@ -202,6 +256,7 @@ func ScrubCredentials(text string) string {
 	for _, pat := range credentialPatterns {
 		text = pat.ReplaceAllString(text, redactedPlaceholder)
 	}
+	text = scrubLongHex(text)
 
 	// Credential values (from credentialed exec)
 	credentialScrubMu.RLock()
