@@ -22,13 +22,18 @@ type acpRelay struct {
 	sinks      *acpbridge.WakeSinks
 	inputs     *acpbridge.InputRelays
 	dispatcher *mcpbridge.WakeDispatcher
+	// origins remembers the ACP client of each session; resultWaker uses it
+	// to wake the thread of the client with the result of a background run.
+	origins     *acpbridge.SessionOrigins
+	resultWaker *acpbridge.ResultWaker
 }
 
 // newACPRelay creates the registries. With a task watch manager it also
 // creates the wake dispatcher: a new wake row and a new subscription wake
 // it.
 func newACPRelay(taskWatch *mcpbridge.TaskWatchManager, servers store.MCPServerStore) *acpRelay {
-	r := &acpRelay{sinks: acpbridge.NewWakeSinks(0), inputs: acpbridge.NewInputRelays()}
+	r := &acpRelay{sinks: acpbridge.NewWakeSinks(0), inputs: acpbridge.NewInputRelays(), origins: acpbridge.NewSessionOrigins()}
+	r.resultWaker = acpbridge.NewResultWaker(r.origins, r.sinks)
 	if taskWatch == nil || servers == nil {
 		return r
 	}
@@ -59,6 +64,7 @@ func (r *acpRelay) stop() {
 // relay to chat.send, and releases the relay state of a closed connection.
 func (r *acpRelay) register(server *gateway.Server, agents *agent.Router, chat *methods.ChatMethods) {
 	chat.SetACPInputRelays(r.inputs)
+	chat.SetACPSessionOrigins(r.origins)
 	router := server.Router()
 	methods.NewACPWakeMethods(r.sinks, routerAgentResolver(agents)).Register(router)
 	methods.NewACPInputMethods(r.inputs).Register(router)
