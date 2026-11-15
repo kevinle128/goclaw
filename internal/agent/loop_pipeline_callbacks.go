@@ -62,6 +62,7 @@ func (l *Loop) pipelineCallbacks(req *RunRequest, bridgeRS *runState) pipelineCa
 		checkReadOnly:      l.makeCheckReadOnly(req, bridgeRS),
 		sanitizeContent:    SanitizeAssistantContent,
 		flushMessages:      l.makeFlushMessages(req),
+		recordRuntimeCtx:   func(block string) { req.runtimeContext = block },
 		updateMetadata:     l.makeUpdateMetadata(req),
 		bootstrapCleanup:   l.makeBootstrapCleanup(),
 		maybeSummarize:     l.maybeSummarize,
@@ -91,6 +92,7 @@ type pipelineCallbackSet struct {
 	checkReadOnly      func(state *pipeline.RunState) (*providers.Message, bool)
 	sanitizeContent    func(string) string
 	flushMessages      func(ctx context.Context, sessionKey string, msgs []providers.Message) error
+	recordRuntimeCtx   func(block string)
 	updateMetadata     func(ctx context.Context, sessionKey string, usage providers.Usage) error
 	bootstrapCleanup   func(ctx context.Context, state *pipeline.RunState) error
 	maybeSummarize     func(ctx context.Context, sessionKey string)
@@ -646,9 +648,12 @@ func (l *Loop) makeFlushMessages(req *RunRequest) func(ctx context.Context, sess
 		}
 		if !userMsgFlushed && !req.HideInput && req.Message != "" {
 			userMsgFlushed = true
+			// Store the message as the model saw it. A runtime block that was
+			// sent must stay in history, otherwise the next request would not
+			// begin with this one and the provider cache would miss.
 			l.sessions.AddMessage(ctx, sessionKey, providers.Message{
 				Role:    "user",
-				Content: req.Message,
+				Content: req.runtimeContext + req.Message,
 			})
 		}
 		for _, msg := range msgs {

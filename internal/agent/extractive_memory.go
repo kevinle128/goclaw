@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/nextlevelbuilder/goclaw/internal/pipeline"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
 
@@ -41,7 +42,7 @@ func ExtractiveMemoryFallback(history []providers.Message) string {
 	var texts []string
 	for _, msg := range history {
 		if msg.Role == "user" || msg.Role == "assistant" {
-			if content := strings.TrimSpace(msg.Content); content != "" {
+			if content := strings.TrimSpace(pipeline.StripRuntimeContext(msg.Content)); content != "" {
 				texts = append(texts, content)
 			}
 		}
