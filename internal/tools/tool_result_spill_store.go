@@ -73,15 +73,22 @@ type SpillResult struct {
 	Wrapped bool
 }
 
-// ToolResultSessionHash returns the hex SHA-256 of the tenant and session key.
-// A missing tenant counts as the master tenant, matching how the session
-// stores key their rows, so save and delete agree on the directory name.
+// toolResultSessionHashLen is the hex length of the session directory name. It
+// must stay below the 64-char run the credential scrubber redacts, because the
+// spill path is shown to the model after scrubbing; 20 hex chars are 80 bits,
+// ample to keep sessions of one tenant apart.
+const toolResultSessionHashLen = 20
+
+// ToolResultSessionHash returns the first toolResultSessionHashLen hex chars of
+// the SHA-256 of the tenant and session key. A missing tenant counts as the
+// master tenant, matching how the session stores key their rows, so save and
+// delete agree on the directory name.
 func ToolResultSessionHash(tenantID uuid.UUID, sessionKey string) string {
 	if tenantID == uuid.Nil {
 		tenantID = store.MasterTenantID
 	}
 	sum := sha256.Sum256([]byte(tenantID.String() + "\x00" + sessionKey))
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:])[:toolResultSessionHashLen]
 }
 
 // Save writes content to {workspace}/.tool-results/session-{hash}/{random}-{tool}.txt.

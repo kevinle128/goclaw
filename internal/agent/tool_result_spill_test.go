@@ -348,3 +348,33 @@ func TestPipeline_SpillGuardKeepsProductionCaseAlive(t *testing.T) {
 		})
 	}
 }
+
+// The notice is scrubbed before the model sees it. The spill path in it must
+// survive that scrub and still point at a readable file.
+func TestSpillNotice_PathSurvivesCredentialScrub(t *testing.T) {
+	workspace := t.TempDir()
+	l := newSpillLoop(t, t.TempDir(), 1000)
+	bound := l.makeBoundToolResult(quarterCounter{})
+
+	content := vietnameseBlob(30000)
+	tc := providers.ToolCall{ID: "tc-1", Name: "mcp_gitlab___search_project_code"}
+	got := bound(spillCtx(workspace, uuid.New()), spillState("sess-a"), tc, toolMsg(content))
+
+	scrubbed := tools.ScrubCredentials(got.Content)
+	idx := strings.Index(scrubbed, ".tool-results/")
+	if idx < 0 {
+		t.Fatalf("spill path missing from scrubbed notice: %.400s", scrubbed)
+	}
+	rel := scrubbed[idx:]
+	rel = rel[:strings.Index(rel, ".txt")+len(".txt")]
+	if strings.Contains(rel, "[REDACTED]") {
+		t.Fatalf("scrubber redacted the spill path: %s", rel)
+	}
+	data, err := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatalf("path shown to the model is not readable: %v", err)
+	}
+	if string(data) != content {
+		t.Errorf("file behind the scrubbed path differs from the full result")
+	}
+}
