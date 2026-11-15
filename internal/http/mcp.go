@@ -120,7 +120,7 @@ func (h *MCPHandler) handleListServers(w http.ResponseWriter, r *http.Request) {
 	counts, _ := h.store.CountAgentGrantsByServer(r.Context())
 	result := make([]mcpServerWithCounts, len(servers))
 	for i, srv := range servers {
-		result[i] = mcpServerWithCounts{MCPServerData: srv, AgentCount: counts[srv.ID]}
+		result[i] = mcpServerWithCounts{MCPServerData: maskMCPServer(srv), AgentCount: counts[srv.ID]}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"servers": result})
@@ -178,7 +178,7 @@ func (h *MCPHandler) handleCreateServer(w http.ResponseWriter, r *http.Request) 
 
 	h.emitCacheInvalidate()
 	emitAudit(h.msgBus, r, "mcp_server.created", "mcp_server", srv.ID.String())
-	writeJSON(w, http.StatusCreated, srv)
+	writeJSON(w, http.StatusCreated, maskMCPServer(srv))
 }
 
 func (h *MCPHandler) handleGetServer(w http.ResponseWriter, r *http.Request) {
@@ -195,7 +195,7 @@ func (h *MCPHandler) handleGetServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, srv)
+	writeJSON(w, http.StatusOK, maskMCPServer(*srv))
 }
 
 func (h *MCPHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +222,12 @@ func (h *MCPHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request) 
 	// Allowlist: only permit known MCP server columns.
 	updates = filterAllowedKeys(updates, mcpServerAllowedFields)
 
+	// Read endpoints return the marker instead of secrets, so a client that
+	// sends it back means "keep the stored value", not "set the value to ***".
+	if apiKey, ok := updates["api_key"].(string); ok && apiKey == mcpMaskedValue {
+		delete(updates, "api_key")
+	}
+
 	// The update replaces the whole settings object, so check it as a whole.
 	if settings, ok := updates["settings"]; ok {
 		raw, err := json.Marshal(settings)
@@ -237,6 +243,18 @@ func (h *MCPHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request) 
 	// Security validation: validate updated fields
 	// For updates, we need to consider the existing server + updated fields
 	existingSrv, _ := h.store.GetServer(r.Context(), id)
+	for _, field := range []string{"headers", "env"} {
+		if v, ok := updates[field]; ok {
+			var stored json.RawMessage
+			if existingSrv != nil {
+				stored = existingSrv.Headers
+				if field == "env" {
+					stored = existingSrv.Env
+				}
+			}
+			updates[field] = restoreMaskedMCPMap(v, stored)
+		}
+	}
 	if existingSrv != nil {
 		// Determine effective values (update or existing)
 		transport := existingSrv.Transport

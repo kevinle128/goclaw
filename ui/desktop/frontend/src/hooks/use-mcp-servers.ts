@@ -58,6 +58,7 @@ export function useMcpServers() {
   }, [])
 
   const testConnection = useCallback(async (data: {
+    server_id?: string
     transport: string
     command?: string
     args?: string[]

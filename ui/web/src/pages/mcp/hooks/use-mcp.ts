@@ -109,7 +109,7 @@ export function useMCP() {
   );
 
   const testConnection = useCallback(
-    async (data: { transport: string; command?: string; args?: string[]; url?: string; headers?: Record<string, string>; env?: Record<string, string> }) => {
+    async (data: { server_id?: string; transport: string; command?: string; args?: string[]; url?: string; headers?: Record<string, string>; env?: Record<string, string> }) => {
       return http.post<{ success: boolean; tool_count?: number; error?: string }>("/v1/mcp/servers/test", data);
     },
     [http],

@@ -16,6 +16,9 @@ import (
 func (h *MCPHandler) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 	locale := store.LocaleFromContext(r.Context())
 	var req struct {
+		// ServerID is set when the form edits a saved server. Read APIs mask
+		// stored credentials, so marker values are resolved from that server.
+		ServerID  string            `json:"server_id"`
 		Transport string            `json:"transport"`
 		Command   string            `json:"command"`
 		Args      []string          `json:"args"`
@@ -38,6 +41,21 @@ func (h *MCPHandler) handleTestConnection(w http.ResponseWriter, r *http.Request
 			"error":   err.Error(),
 		})
 		return
+	}
+
+	if req.ServerID != "" {
+		id, err := uuid.Parse(req.ServerID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": i18n.T(locale, i18n.MsgInvalidID, "server")})
+			return
+		}
+		saved, err := h.store.GetServer(r.Context(), id)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": i18n.T(locale, i18n.MsgNotFound, "server", id.String())})
+			return
+		}
+		req.Headers = restoreMaskedMCPStrings(req.Headers, saved.Headers)
+		req.Env = restoreMaskedMCPStrings(req.Env, saved.Env)
 	}
 
 	tools, err := mcpbridge.DiscoverTools(r.Context(), req.Transport, req.Command, req.Args, req.Env, req.URL, req.Headers)

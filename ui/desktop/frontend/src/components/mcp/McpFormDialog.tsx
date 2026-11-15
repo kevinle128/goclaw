@@ -16,7 +16,7 @@ interface McpFormDialogProps {
   onOpenChange: (open: boolean) => void
   server?: MCPServerData | null
   onSubmit: (data: MCPServerInput) => Promise<unknown>
-  onTest: (data: { transport: string; command?: string; args?: string[]; url?: string; headers?: Record<string, string>; env?: Record<string, string> }) => Promise<MCPTestResult>
+  onTest: (data: { transport: string; command?: string; args?: string[]; url?: string; headers?: Record<string, string>; env?: Record<string, string>; server_id?: string }) => Promise<MCPTestResult>
 }
 
 export function McpFormDialog({ open, onOpenChange, server, onSubmit, onTest }: McpFormDialogProps) {
@@ -86,7 +86,7 @@ export function McpFormDialog({ open, onOpenChange, server, onSubmit, onTest }: 
     setTestState('testing')
     setTestResult(null)
     try {
-      const data: Parameters<typeof onTest>[0] = { transport }
+      const data: Parameters<typeof onTest>[0] = { transport, server_id: server?.id }
       if (transport === 'stdio') {
         data.command = watch('command')
         const a = watch('args').trim()

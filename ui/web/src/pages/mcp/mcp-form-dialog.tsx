@@ -42,6 +42,9 @@ interface MCPFormDialogProps {
   server?: MCPServerData | null;
   onSubmit: (data: MCPServerInput) => Promise<unknown>;
   onTest: (data: {
+    // Saved server being edited: the API masks stored secrets, so the test
+    // call resolves masked header and env values from this server.
+    server_id?: string;
     transport: string;
     command?: string;
     args?: string[];
@@ -151,7 +154,7 @@ export function MCPFormDialog({ open, onOpenChange, server, onSubmit, onTest }: 
     setError("");
     setTestResult(null);
     try {
-      const result = await onTest(buildConnectionData());
+      const result = await onTest({ ...buildConnectionData(), server_id: server?.id });
       setTestResult(result);
     } catch (err: unknown) {
       setTestResult({ success: false, error: err instanceof Error ? err.message : t("form.errors.connectionFailed") });

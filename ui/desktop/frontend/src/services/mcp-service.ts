@@ -3,6 +3,7 @@ import { getApiClient } from '../lib/api'
 import type { MCPServerData, MCPServerInput, MCPAgentGrant, MCPToolInfo, MCPTestResult } from '../types/mcp'
 
 export interface McpTestConnectionInput {
+  server_id?: string
   transport: string
   command?: string
   args?: string[]
