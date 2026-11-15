@@ -107,6 +107,23 @@ Send a message to an agent and trigger execution.
 
 When `stream: true`, intermediate events are emitted: `chunk`, `tool.call`, `tool.result`, `run.started`, `run.completed`.
 
+When a run stops without a normal answer, the response also has an `abort` object next to `content`. The key is absent for a normal run, and clients that do not read it see the same `content` as before.
+
+```json
+{
+  "runId": "uuid",
+  "content": "This conversation is too long for the model, even after trimming old content. ...",
+  "abort": {"reason": "context_over_budget", "message": "<same reply text>", "usedTokens": 1473269, "budgetTokens": 206621}
+}
+```
+
+| `reason` | Cause | `usedTokens` / `budgetTokens` |
+|---|---|---|
+| `context_over_budget` | History plus pending tool results still exceed the history budget after compaction. `content` is the over-budget reply, also sent as a `chunk`. | History + pending tokens at the abort, and the history budget. |
+| `output_truncated` | The model output was cut off three times in a row. `content` is empty. | Absent (not meaningful). |
+
+`reason` is an open set; clients must accept unknown values. `message` is English unless the connection sent another `locale`.
+
 The ACP adapter also sends `acpGeneration`, `terminalMode` and the optional `acpClient` object: `{"elicitationForm": bool, "wake": bool, "thread": {...}, "acpSessionId": "..."}`. With `acpClient`, the run gets the ACP origin of the turn (for MCP task wakes) and an input relay for form elicitation. A Gateway that does not know `acpClient` ignores it; without it the run behaves as before. See [25 — ACP Server](25-acp-server.md#wake-delivery).
 
 Rapid text-only `chat.send` requests for the same user and session are debounced by `gateway.inbound_debounce_ms`: `0` means no debounce and positive values set the wait window. Agents can override the global value with `other_config.inbound_debounce_ms`; unset inherits the global config. The merged message keeps request params from the latest send and joins text with newlines. Cancel keywords bypass debounce and abort the active run immediately. Media sends bypass the wait window and drain any pending text into the same dispatch.

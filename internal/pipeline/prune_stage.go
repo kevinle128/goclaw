@@ -211,9 +211,16 @@ func (s *PruneStage) Execute(ctx context.Context, state *RunState) error {
 		slog.Warn("still over budget after compaction", "tokens", historyTokens, "budget", budget)
 		// Without a final reply the client gets nothing, and the user cannot
 		// tell that this session will keep failing.
-		if s.deps.OverBudgetMessage != nil {
-			state.Observe.FinalContent = s.deps.OverBudgetMessage(ctx)
+		abort := &TurnAbort{
+			Reason:       AbortReasonContextOverBudget,
+			UsedTokens:   historyTokens,
+			BudgetTokens: budget,
 		}
+		if s.deps.OverBudgetMessage != nil {
+			abort.Message = s.deps.OverBudgetMessage(ctx)
+			state.Observe.FinalContent = abort.Message
+		}
+		state.Abort = abort
 		s.result = AbortRun
 	}
 

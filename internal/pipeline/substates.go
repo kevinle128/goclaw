@@ -102,6 +102,21 @@ type EvolutionState struct {
 	TeamTaskSpawns  int  // delegate tool calls (spawns)
 }
 
+// Abort reasons reported to clients when a run stops without a normal answer.
+const (
+	AbortReasonContextOverBudget = "context_over_budget"
+	AbortReasonOutputTruncated   = "output_truncated"
+)
+
+// TurnAbort describes why a run stopped early, so clients can tell an abort
+// from an answer. Message is the raw reply text; later stages never change it.
+type TurnAbort struct {
+	Reason       string
+	Message      string
+	UsedTokens   int // history + pending tokens at the abort; 0 when not meaningful
+	BudgetTokens int // history budget at the abort; 0 when not meaningful
+}
+
 // RunResult is the final output of a pipeline run.
 type RunResult struct {
 	RunID          string
@@ -117,4 +132,5 @@ type RunResult struct {
 	Deliverables   []string
 	BlockReplies   int
 	LastBlockReply string
+	Abort          *TurnAbort // set when the run stopped early; nil for a normal result
 }

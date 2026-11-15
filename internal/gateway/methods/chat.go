@@ -460,24 +460,35 @@ func (m *ChatMethods) dispatchChatSends(requests []chatSendRequest) {
 			}
 		}
 
-		resp := map[string]any{
-			"runId":   result.RunID,
-			"content": content,
-			"usage":   result.Usage,
-		}
-		if result.Thinking != "" {
-			resp["thinking"] = result.Thinking
-		}
-		// Combine existing media with TTS audio
-		mediaResults := result.Media
-		if ttsAudio != nil {
-			mediaResults = append([]agent.MediaResult{*ttsAudio}, mediaResults...)
-		}
-		if len(mediaResults) > 0 {
-			resp["media"] = mediaResults
-		}
+		resp := buildChatSendResponse(result, content, ttsAudio)
 		sendChatOK(requests, resp)
 	}()
+}
+
+// buildChatSendResponse builds the chat.send success payload. "abort" is
+// present only when the run stopped early; "content" still carries the reply,
+// so clients that ignore "abort" behave as before.
+func buildChatSendResponse(result *agent.RunResult, content string, ttsAudio *agent.MediaResult) map[string]any {
+	resp := map[string]any{
+		"runId":   result.RunID,
+		"content": content,
+		"usage":   result.Usage,
+	}
+	if result.Thinking != "" {
+		resp["thinking"] = result.Thinking
+	}
+	if result.Abort != nil {
+		resp["abort"] = result.Abort
+	}
+	// Combine existing media with TTS audio
+	mediaResults := result.Media
+	if ttsAudio != nil {
+		mediaResults = append([]agent.MediaResult{*ttsAudio}, mediaResults...)
+	}
+	if len(mediaResults) > 0 {
+		resp["media"] = mediaResults
+	}
+	return resp
 }
 
 func sendChatOK(requests []chatSendRequest, payload map[string]any) {

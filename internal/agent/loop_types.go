@@ -687,6 +687,15 @@ type RunRequest struct {
 	TeamWorkspace string
 }
 
+// TurnAbort tells a client why a run stopped without a normal answer. The
+// field names are the wire names of the chat.send response "abort" object.
+type TurnAbort struct {
+	Reason       string `json:"reason"`
+	Message      string `json:"message,omitempty"`
+	UsedTokens   int    `json:"usedTokens,omitempty"`
+	BudgetTokens int    `json:"budgetTokens,omitempty"`
+}
+
 // RunResult is the output of a completed agent run.
 type RunResult struct {
 	Content        string           `json:"content"`
@@ -699,6 +708,7 @@ type RunResult struct {
 	BlockReplies   int              `json:"blockReplies,omitempty"`   // number of block.reply events emitted
 	LastBlockReply string           `json:"lastBlockReply,omitempty"` // last block reply content (for dedup)
 	LoopKilled     bool             `json:"loopKilled,omitempty"`     // true when run was terminated by loop detector
+	Abort          *TurnAbort       `json:"abort,omitempty"`          // set when the run stopped early without a normal answer
 }
 
 // MediaResult represents a media file produced by a tool during the agent run.

@@ -151,6 +151,9 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 			})
 			return msg
 		},
+		OutputTruncatedMessage: func(ctx context.Context) string {
+			return i18n.T(store.LocaleFromContext(ctx), i18n.MsgOutputTruncated)
+		},
 
 		// Cache-TTL gate callbacks (Phase 06)
 		GetProviderCaps: func() providers.ProviderCapabilities {
@@ -292,7 +295,17 @@ func convertRunResult(pr *pipeline.RunResult) *RunResult {
 			Prompt:      m.Prompt,
 		}
 	}
+	var abort *TurnAbort
+	if pr.Abort != nil {
+		abort = &TurnAbort{
+			Reason:       pr.Abort.Reason,
+			Message:      pr.Abort.Message,
+			UsedTokens:   pr.Abort.UsedTokens,
+			BudgetTokens: pr.Abort.BudgetTokens,
+		}
+	}
 	return &RunResult{
+		Abort:          abort,
 		Content:        pr.Content,
 		Thinking:       pr.Thinking,
 		RunID:          pr.RunID,

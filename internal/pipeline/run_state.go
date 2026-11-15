@@ -37,6 +37,10 @@ type RunState struct {
 	Iteration int
 	RunID     string
 	ExitCode  StageResult
+
+	// Abort is set by the stage that stops the run early with a reason clients
+	// can act on. Finalize rewrites FinalContent, so the reply text lives here.
+	Abort *TurnAbort
 }
 
 // NewRunState creates a RunState with identity fields set.
@@ -66,6 +70,7 @@ func (rs *RunState) BuildResult() *RunResult {
 		Deliverables:   rs.Tool.Deliverables,
 		BlockReplies:   rs.Observe.BlockReplies,
 		LastBlockReply: rs.Observe.LastBlockReply,
+		Abort:          rs.Abort,
 	}
 }
 

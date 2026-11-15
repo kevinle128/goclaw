@@ -116,6 +116,12 @@ func (s *ThinkStage) Execute(ctx context.Context, state *RunState) error {
 	if truncated || parseErr {
 		state.Think.TruncRetries++
 		if state.Think.TruncRetries >= maxTruncRetries {
+			// Token counts say nothing about this abort, so they stay zero.
+			abort := &TurnAbort{Reason: AbortReasonOutputTruncated}
+			if s.deps.OutputTruncatedMessage != nil {
+				abort.Message = s.deps.OutputTruncatedMessage(ctx)
+			}
+			state.Abort = abort
 			s.result = AbortRun
 			return nil
 		}

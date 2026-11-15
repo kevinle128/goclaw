@@ -92,6 +92,10 @@ type PipelineDeps struct {
 	// when the run must stop because history still exceeds the budget. The
 	// callback also delivers it to stream clients. Optional.
 	OverBudgetMessage func(ctx context.Context) string
+	// OutputTruncatedMessage returns the reply reported with the abort that
+	// follows repeated truncated model output. It only goes into the abort
+	// value: it is not final content and not streamed. Optional.
+	OutputTruncatedMessage func(ctx context.Context) string
 
 	// Cache-TTL gate callbacks (Phase 06). All optional (nil = feature disabled).
 	GetProviderCaps  func() providers.ProviderCapabilities // provider capabilities for cache detection

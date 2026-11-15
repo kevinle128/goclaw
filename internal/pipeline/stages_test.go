@@ -319,6 +319,45 @@ func TestThinkStage_Truncation_ThirdRetry_ReturnsAbortRun(t *testing.T) {
 	}
 }
 
+func TestThinkStage_Truncation_ThirdRetry_ReportsOutputTruncated(t *testing.T) {
+	t.Parallel()
+	deps := &PipelineDeps{
+		Config: PipelineConfig{MaxIterations: 10, MaxTokens: 1000},
+		CallLLM: func(_ context.Context, _ *RunState, _ providers.ChatRequest) (*providers.ChatResponse, error) {
+			return &providers.ChatResponse{
+				FinishReason: "length",
+				ToolCalls:    []providers.ToolCall{{ID: "tc1", Name: "write_file"}},
+			}, nil
+		},
+		OutputTruncatedMessage: func(context.Context) string { return "cut off" },
+	}
+	stage := NewThinkStage(deps)
+	state := defaultState()
+
+	// Two retries are not an abort yet.
+	if err := stage.Execute(context.Background(), state); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if state.Abort != nil {
+		t.Fatalf("Abort = %+v after the first truncation, want nil", state.Abort)
+	}
+
+	state.Think.TruncRetries = 2
+	if err := stage.Execute(context.Background(), state); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	abort := state.Abort
+	if abort == nil || abort.Reason != AbortReasonOutputTruncated || abort.Message != "cut off" {
+		t.Fatalf("Abort = %+v, want reason %q with the reply", abort, AbortReasonOutputTruncated)
+	}
+	if abort.UsedTokens != 0 || abort.BudgetTokens != 0 {
+		t.Errorf("token counts = %d/%d, want 0/0 (not meaningful for truncation)", abort.UsedTokens, abort.BudgetTokens)
+	}
+	if state.Observe.FinalContent != "" {
+		t.Errorf("FinalContent = %q, want empty so clients without abort support see no change", state.Observe.FinalContent)
+	}
+}
+
 func TestThinkStage_TruncationReset_OnSuccess(t *testing.T) {
 	t.Parallel()
 	deps := &PipelineDeps{
@@ -897,6 +936,63 @@ func TestPruneStage_StillOverAfterFit_AbortsWithReply(t *testing.T) {
 	}
 	if state.Observe.FinalContent != "too long" {
 		t.Errorf("FinalContent = %q, want the over-budget reply", state.Observe.FinalContent)
+	}
+	abort := state.Abort
+	if abort == nil {
+		t.Fatal("Abort = nil, want an over-budget abort")
+	}
+	if abort.Reason != AbortReasonContextOverBudget || abort.Message != "too long" {
+		t.Errorf("Abort = %+v, want reason %q and the reply", abort, AbortReasonContextOverBudget)
+	}
+	if abort.BudgetTokens != state.Prune.HistoryBudget || abort.BudgetTokens != 1000-100 {
+		t.Errorf("BudgetTokens = %d, want the history budget %d", abort.BudgetTokens, state.Prune.HistoryBudget)
+	}
+	if abort.UsedTokens != state.Prune.HistoryTokens || abort.UsedTokens <= abort.BudgetTokens {
+		t.Errorf("UsedTokens = %d, want the over-budget history tokens (budget %d)", abort.UsedTokens, abort.BudgetTokens)
+	}
+	if got := state.BuildResult().Abort; got != abort {
+		t.Errorf("BuildResult().Abort = %+v, want the run abort", got)
+	}
+}
+
+func TestPruneStage_UnderBudget_NoAbort(t *testing.T) {
+	t.Parallel()
+	deps := &PipelineDeps{
+		Config:       PipelineConfig{ContextWindow: 1000, MaxTokens: 100},
+		TokenCounter: &mockTokenCounter{countPerMessage: 1},
+	}
+	stage := NewPruneStage(deps, nil)
+	state := defaultState()
+	state.Messages.SetHistory([]providers.Message{{Role: "user", Content: "hi"}})
+
+	if err := stage.Execute(context.Background(), state); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if state.Abort != nil || state.BuildResult().Abort != nil {
+		t.Errorf("Abort = %+v, want nil for a run within budget", state.Abort)
+	}
+}
+
+// The postscript and sanitizer rewrite FinalContent, so the abort keeps its
+// own copy of the reply.
+func TestFinalize_AbortMessageNotChangedByPostscript(t *testing.T) {
+	t.Parallel()
+	deps := &PipelineDeps{
+		SkillPostscript: func(_ context.Context, content string, _ int) string { return content + "\n\nsave this as a skill?" },
+		FlushMessages:   func(_ context.Context, _ string, _ []providers.Message) error { return nil },
+	}
+	state := defaultState()
+	state.Observe.FinalContent = "too long"
+	state.Abort = &TurnAbort{Reason: AbortReasonContextOverBudget, Message: "too long"}
+
+	if err := NewFinalizeStage(deps).Execute(context.Background(), state); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if state.Observe.FinalContent == "too long" {
+		t.Fatal("test setup: the postscript did not change FinalContent")
+	}
+	if got := state.BuildResult().Abort.Message; got != "too long" {
+		t.Errorf("Abort.Message = %q, want the raw reply", got)
 	}
 }
 
