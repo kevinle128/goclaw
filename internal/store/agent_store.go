@@ -253,6 +253,23 @@ func (a *AgentData) ParseAllowImageGeneration() bool {
 	return *bag.AllowImageGeneration
 }
 
+// ParseStablePromptPrefix returns other_config.stable_prompt_prefix. When true,
+// the agent keeps per-turn prompt content out of the system message and keeps
+// tool order stable within a run, so the provider prefix cache can be reused.
+// Absent, false or malformed config returns false (the previous layout).
+func (a *AgentData) ParseStablePromptPrefix() bool {
+	if len(a.OtherConfig) <= 2 {
+		return false
+	}
+	var bag struct {
+		StablePromptPrefix *bool `json:"stable_prompt_prefix"`
+	}
+	if json.Unmarshal(a.OtherConfig, &bag) != nil || bag.StablePromptPrefix == nil {
+		return false
+	}
+	return *bag.StablePromptPrefix
+}
+
 // DefaultToolResultMaxTokens is the per-result token threshold above which a
 // tool result is saved to a file and replaced by a preview.
 const DefaultToolResultMaxTokens = 20000

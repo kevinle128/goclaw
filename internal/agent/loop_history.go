@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/edition"
+	"github.com/nextlevelbuilder/goclaw/internal/pipeline"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
@@ -258,7 +259,19 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		DelegateTargets:        l.delegateTargets,
 		OrchMode:               l.orchMode,
 		ProviderContribution:   l.providerContribution(),
+		StablePrefix:           l.stablePromptPrefix,
 	})
+
+	// Stable prefix: only the part above the cache boundary stays in the system
+	// message. The per-turn part rides in front of the current user message for
+	// this request only; the session keeps the raw user text.
+	currentUserContent := userMessage
+	if l.stablePromptPrefix {
+		if stable, dynamic, found := strings.Cut(systemPrompt, CacheBoundaryMarker); found {
+			systemPrompt = strings.TrimRight(stable, "\n")
+			currentUserContent = pipeline.WrapRuntimeContext(strings.TrimSpace(dynamic), userMessage)
+		}
+	}
 
 	messages = append(messages, providers.Message{
 		Role:    "system",
@@ -296,7 +309,7 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 	// Current user message
 	messages = append(messages, providers.Message{
 		Role:    "user",
-		Content: userMessage,
+		Content: currentUserContent,
 	})
 
 	return messages, hadBootstrap

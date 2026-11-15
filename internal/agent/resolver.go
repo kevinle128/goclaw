@@ -526,6 +526,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			PinnedSkills:           ag.ParsePinnedSkills(),
 			SelfEvolve:             ag.ParseSelfEvolve(),
 			AllowImageGeneration:   ag.ParseAllowImageGeneration(),
+			StablePromptPrefix:     ag.ParseStablePromptPrefix(),
 			ToolResultMaxTokens:    ag.ParseToolResultMaxTokens(),
 			ToolResultSpill:        deps.ToolResultSpill,
 			TTSAutoMode:            deps.TTSAutoMode,

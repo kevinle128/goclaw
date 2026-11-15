@@ -165,6 +165,11 @@ type SystemPromptConfig struct {
 
 	// Provider-specific prompt customizations (nil = defaults).
 	ProviderContribution *providers.PromptContribution
+
+	// StablePrefix moves the chat-specific identity lines (channel, chat type,
+	// reply target) below the cache boundary, so the text above it does not
+	// differ between chats of the same agent.
+	StablePrefix bool
 }
 
 // sectionContent returns override content if provider contribution has one,
@@ -238,6 +243,9 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 	isNone := cfg.Mode == PromptNone
 
 	var lines []string
+	// chatIdentity holds the chat-specific identity lines. They stay at the top
+	// of the prompt, except with StablePrefix, which emits them after the boundary.
+	var chatIdentity []string
 
 	// 1. Identity — channel-aware context (use ChannelType for clarity, fallback to Channel)
 	channelLabel := cfg.ChannelType
@@ -253,8 +261,8 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 				chatType = fmt.Sprintf("group chat \"%s\"", title)
 			}
 		}
-		lines = append(lines, fmt.Sprintf("You are a personal assistant running in %s (%s).", channelLabel, chatType))
-		lines = append(lines, "")
+		chatIdentity = append(chatIdentity, fmt.Sprintf("You are a personal assistant running in %s (%s).", channelLabel, chatType))
+		chatIdentity = append(chatIdentity, "")
 
 		// Inject explicit reply-target block so the LLM has a copy-paste-ready
 		// value to compare against when deciding to forward. Pairs with the
@@ -264,7 +272,7 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 			if cfg.PeerKind == "group" {
 				kind = "group"
 			}
-			lines = append(lines,
+			chatIdentity = append(chatIdentity,
 				"<current_reply_target>",
 				fmt.Sprintf("  channel: %s", channelLabel),
 				fmt.Sprintf("  chat_id: %s", cfg.ChatID),
@@ -274,6 +282,10 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 				"",
 			)
 		}
+	}
+	if !cfg.StablePrefix {
+		lines = append(lines, chatIdentity...)
+		chatIdentity = nil
 	}
 
 	// 1.5. First-run bootstrap override (must be early so model sees it first)
@@ -482,6 +494,7 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 
 	// ── CACHE BOUNDARY ── stable config above, dynamic per-turn/per-user below.
 	lines = append(lines, CacheBoundaryMarker, "")
+	lines = append(lines, chatIdentity...)
 
 	// Provider DynamicSuffix — injected after boundary
 	if cfg.ProviderContribution != nil && cfg.ProviderContribution.DynamicSuffix != "" {

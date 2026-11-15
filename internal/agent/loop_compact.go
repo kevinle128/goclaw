@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nextlevelbuilder/goclaw/internal/pipeline"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
 
@@ -67,7 +68,7 @@ func (l *Loop) compactMessagesInPlace(ctx context.Context, messages []providers.
 	for _, m := range toSummarize {
 		switch m.Role {
 		case "user":
-			fmt.Fprintf(&sb, "user: %s\n", m.Content)
+			fmt.Fprintf(&sb, "user: %s\n", pipeline.StripRuntimeContext(m.Content))
 		case "assistant":
 			fmt.Fprintf(&sb, "assistant: %s\n", SanitizeAssistantContent(m.Content))
 		}

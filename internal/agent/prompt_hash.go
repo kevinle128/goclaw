@@ -4,8 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"strings"
 
+	"github.com/nextlevelbuilder/goclaw/internal/pipeline"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
 
@@ -76,4 +78,48 @@ func toolDefKey(td providers.ToolDefinition) string {
 		return td.Function.Name
 	}
 	return "type:" + td.Type
+}
+
+// applyStableToolOrder keeps tool definitions in the order the run first sent
+// them. A tool seen for the first time (for example a deferred MCP tool that
+// mcp_tool_search activated) is appended after the known tools, sorted within
+// its batch; a tool that is missing from one build is skipped without moving
+// the others, and takes its old place if it returns. An empty list (final
+// iteration) leaves the recorded order unchanged.
+func applyStableToolOrder(state *pipeline.RunState, defs []providers.ToolDefinition) []providers.ToolDefinition {
+	if len(defs) == 0 {
+		return defs
+	}
+	order := state.Think.ToolOrder
+	if len(order) == 0 {
+		state.Think.ToolOrder = make([]string, 0, len(defs))
+		for _, td := range defs {
+			state.Think.ToolOrder = append(state.Think.ToolOrder, toolDefKey(td))
+		}
+		return defs
+	}
+
+	position := make(map[string]int, len(order))
+	for i, key := range order {
+		position[key] = i
+	}
+	known := make([]providers.ToolDefinition, 0, len(defs))
+	var fresh []providers.ToolDefinition
+	for _, td := range defs {
+		if _, ok := position[toolDefKey(td)]; ok {
+			known = append(known, td)
+		} else {
+			fresh = append(fresh, td)
+		}
+	}
+	slices.SortStableFunc(known, func(a, b providers.ToolDefinition) int {
+		return position[toolDefKey(a)] - position[toolDefKey(b)]
+	})
+	slices.SortStableFunc(fresh, func(a, b providers.ToolDefinition) int {
+		return strings.Compare(toolDefKey(a), toolDefKey(b))
+	})
+	for _, td := range fresh {
+		state.Think.ToolOrder = append(state.Think.ToolOrder, toolDefKey(td))
+	}
+	return append(known, fresh...)
 }

@@ -173,9 +173,11 @@ func (s *ContextStage) Execute(ctx context.Context, state *RunState) error {
 		section, err := s.deps.AutoInject(ctx, state.Input.Message, state.Input.UserID, recentCtx)
 		if err == nil && section != "" {
 			state.Context.MemorySection = section
-			sys := state.Messages.System()
-			sys.Content += "\n\n" + section
-			state.Messages.SetSystem(sys)
+			if !s.deps.Config.StablePromptPrefix || !addMemoryToCurrentTurn(state, section) {
+				sys := state.Messages.System()
+				sys.Content += "\n\n" + section
+				state.Messages.SetSystem(sys)
+			}
 		}
 	}
 
@@ -201,10 +203,11 @@ func buildRecentContext(history []providers.Message) string {
 	turns := make([]string, 0, maxTurns)
 	for i := len(history) - 1; i >= 0 && len(turns) < maxTurns; i-- {
 		m := history[i]
-		if m.Role != "user" || m.Content == "" {
+		content := StripRuntimeContext(m.Content)
+		if m.Role != "user" || content == "" {
 			continue
 		}
-		turns = append([]string{m.Content}, turns...) // prepend to preserve order
+		turns = append([]string{content}, turns...) // prepend to preserve order
 	}
 	if len(turns) == 0 {
 		return ""

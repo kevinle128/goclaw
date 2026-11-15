@@ -246,6 +246,9 @@ func (l *Loop) makeBuildFilteredTools(req *RunRequest) func(state *pipeline.RunS
 				existing[name] = struct{}{}
 			}
 		}
+		if l.stablePromptPrefix {
+			toolDefs = applyStableToolOrder(state, toolDefs)
+		}
 		// buildFilteredTools returns the full messages slice; only messages appended
 		// beyond the original length are injections (e.g. final-iteration hint).
 		// Appending the entire slice would duplicate system+history into pending.

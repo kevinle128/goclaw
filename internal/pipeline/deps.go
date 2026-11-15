@@ -183,6 +183,12 @@ type PipelineConfig struct {
 	// Recommended: 5-10% of contextWindow for reasoning-heavy models.
 	ReserveTokens int
 
+	// StablePromptPrefix keeps per-turn content (runtime context, L0 memory)
+	// out of the system message: it goes into the current-turn user message
+	// request instead, so the system prefix stays byte-stable across runs.
+	// Default false keeps the previous layout.
+	StablePromptPrefix bool
+
 	// V3 memory/retrieval flags removed — always true at runtime.
 	// Memory flush runs if callback != nil; auto-inject runs if AutoInject != nil.
 }

@@ -335,6 +335,18 @@ The system prompt is assembled dynamically from 19 sections. Two modes control t
 22. **Persona Reminder** -- recency reinforcement to combat "lost in the middle" in long conversations.
 23. **Memory Reminders** -- prompts to run memory_search and knowledge_graph_search before answering.
 
+### Cache-Stable Layout (`other_config.stable_prompt_prefix`)
+
+Default (`false` or absent): one system message holds the stable sections, `<!-- GOCLAW_CACHE_BOUNDARY -->`, then the per-turn sections. The L0 memory section is appended to the system message by ContextStage. Because that text changes on almost every run, an OpenAI-compatible provider (no cache breakpoints) cannot reuse its prefix cache on the first call of a run.
+
+With `"stable_prompt_prefix": true` on an agent:
+
+- The system message holds only the text above the boundary. The chat-specific identity lines (channel, chat type, `<current_reply_target>`) move below the boundary, so the system text does not depend on the chat.
+- Everything below the boundary and the L0 memory section go into one `<runtime_context>...</runtime_context>` block at the start of the current-turn user message, for that request only. The session stores the raw user text (`makeFlushMessages` writes `req.Message`), so history keeps a byte-stable prefix. Recall queries and mid-loop compaction input strip the block.
+- Tool definitions keep the order of the run's first tool build. A tool that appears later, such as a deferred MCP tool activated by `mcp_tool_search`, is appended after the known tools. The order lives in `RunState.Think.ToolOrder`, so a new run starts from the sorted order again.
+
+The per-call log `debug.llm.first_response` carries `iteration`, `system_stable_hash`, `system_dynamic_hash`, `tools_hash` and `tools_names_hash` (12 hex characters of SHA-256, no prompt text). Compare them between the first calls of consecutive runs to see whether prompt content or tool order breaks the prefix. A new agent setting takes effect when the agent loop is rebuilt (router cache TTL).
+
 ---
 
 ## 3. Sanitize Output

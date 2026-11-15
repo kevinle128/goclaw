@@ -81,6 +81,7 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 			ContextWindow:      l.contextWindow,
 			MaxTokens:          l.effectiveMaxTokens(),
 			ReserveTokens:      l.resolveReserveTokens(),
+			StablePromptPrefix: l.stablePromptPrefix,
 			Compaction:         l.compactionCfg,
 			// V3 memory/retrieval flags removed — always true at runtime.
 		},

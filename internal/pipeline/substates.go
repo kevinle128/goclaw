@@ -41,6 +41,11 @@ type ThinkState struct {
 	// it always calls BuildFilteredTools per iteration because the tool list is
 	// iteration-dependent (final iteration strips all tools).
 	Tools []providers.ToolDefinition
+
+	// ToolOrder is the order of tool definitions sent in this run (keys from
+	// the agent's tool key function). Used only with StablePromptPrefix: tools
+	// seen earlier keep their position, new tools are appended. Per run.
+	ToolOrder []string
 }
 
 // PruneState: owned by PruneStage.

@@ -208,6 +208,10 @@ type Loop struct {
 	// Defaults to true; set false via other_config.allow_image_generation = false.
 	allowImageGeneration bool
 
+	// stablePromptPrefix: keep per-turn content out of the system message and
+	// keep tool order stable within a run (provider prefix cache). Default false.
+	stablePromptPrefix bool
+
 	// toolResultMaxTokens / toolResultSpill: oversized tool results go to a file.
 	// Read-only during runs; the spill path is derived per call from the run context.
 	toolResultMaxTokens int
@@ -418,6 +422,9 @@ type LoopConfig struct {
 	// Defaults to true; set false to disable image generation for this agent.
 	AllowImageGeneration bool
 
+	// StablePromptPrefix mirrors other_config.stable_prompt_prefix (default false).
+	StablePromptPrefix bool
+
 	// ToolResultMaxTokens is the per-agent threshold above which a tool result is
 	// saved to a file and replaced by a preview (0 = off).
 	ToolResultMaxTokens int
@@ -588,6 +595,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		pinnedSkills:           cfg.PinnedSkills,
 		selfEvolve:             cfg.SelfEvolve,
 		allowImageGeneration:   cfg.AllowImageGeneration,
+		stablePromptPrefix:     cfg.StablePromptPrefix,
 		toolResultMaxTokens:    cfg.ToolResultMaxTokens,
 		toolResultSpill:        cfg.ToolResultSpill,
 		ttsAutoMode:            cfg.TTSAutoMode,
