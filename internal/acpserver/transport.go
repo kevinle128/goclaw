@@ -491,7 +491,10 @@ func (t *Transport) initialize(ctx context.Context, id, raw json.RawMessage) err
 			LoadSession:        false,
 			PromptCapabilities: PromptCapabilities{},
 			MCPCapabilities:    MCPCapabilities{},
-			Meta:               map[string]any{WakeCapabilityKey: map[string]int{"version": WakeCapabilityVersion}},
+			Meta: map[string]any{
+				WakeCapabilityKey: map[string]int{"version": WakeCapabilityVersion},
+				TurnAbortKey:      map[string]int{"version": TurnAbortVersion},
+			},
 		},
 		AgentInfo:   AgentInfo{Name: "goclaw", Title: "GoClaw", Version: t.agentVersion},
 		AuthMethods: []any{},

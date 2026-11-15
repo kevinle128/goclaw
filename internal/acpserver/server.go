@@ -319,13 +319,38 @@ func (s *Server) handlePrompt(ctx context.Context, params PromptParams) (PromptR
 			if result.response.Cancelled {
 				return PromptResult{StopReason: "cancelled"}, nil
 			}
-			return PromptResult{StopReason: "end_turn"}, nil
+			return promptResultFor(result.response), nil
 		case <-eventErrors:
 			return PromptResult{}, &RPCError{Code: CodeGatewayError, Message: "Gateway connection outcome is indeterminate"}
 		case <-promptCtx.Done():
 			return PromptResult{StopReason: "cancelled"}, nil
 		}
 	}
+}
+
+// promptResultFor builds the result of a completed prompt. A run that stopped
+// early still ends the turn; the abort rides in _meta so clients can show the
+// reply and decide about the session.
+func promptResultFor(response ChatSendResponse) PromptResult {
+	result := PromptResult{StopReason: "end_turn"}
+	abort := response.Abort
+	if abort == nil {
+		return result
+	}
+	meta := map[string]any{
+		"reason":       abort.Reason,
+		"message":      abort.Message,
+		"resetSession": abort.Reason == TurnAbortReasonContextOverBudget,
+	}
+	// Token counts are display only; omit them when the run has no meaningful value.
+	if abort.UsedTokens > 0 {
+		meta["usedTokens"] = abort.UsedTokens
+	}
+	if abort.BudgetTokens > 0 {
+		meta["budgetTokens"] = abort.BudgetTokens
+	}
+	result.Meta = map[string]any{TurnAbortKey: meta}
+	return result
 }
 
 // acpClient returns the acpClient param of chat.send for the active prompt:

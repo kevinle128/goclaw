@@ -89,11 +89,21 @@ func (e *GatewayResponseError) Error() string {
 	return "gateway request failed: " + e.Code
 }
 
+// ChatTurnAbort is the chat.send "abort" object: why the run stopped without a
+// normal answer. A gateway that predates it never sends the key.
+type ChatTurnAbort struct {
+	Reason       string `json:"reason"`
+	Message      string `json:"message,omitempty"`
+	UsedTokens   int    `json:"usedTokens,omitempty"`
+	BudgetTokens int    `json:"budgetTokens,omitempty"`
+}
+
 type ChatSendResponse struct {
-	Content   string `json:"content"`
-	Thinking  string `json:"thinking,omitempty"`
-	RunID     string `json:"runId,omitempty"`
-	Cancelled bool   `json:"cancelled,omitempty"`
+	Content   string         `json:"content"`
+	Thinking  string         `json:"thinking,omitempty"`
+	RunID     string         `json:"runId,omitempty"`
+	Cancelled bool           `json:"cancelled,omitempty"`
+	Abort     *ChatTurnAbort `json:"abort,omitempty"`
 }
 
 type ChatAbortRequest struct {

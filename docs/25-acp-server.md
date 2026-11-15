@@ -41,13 +41,34 @@ It does not support `session/load`, client-driven session release, image or audi
 
 ### Capabilities
 
-The `initialize` result advertises `agentCapabilities._meta["buzz.wake"] = {"version": 1}`.
+The `initialize` result advertises `agentCapabilities._meta["buzz.wake"] = {"version": 1}` and `agentCapabilities._meta["buzz.turnAbort"] = {"version": 1}`. A client does not need to support `buzz.turnAbort`.
 The adapter reads these client capabilities from the `initialize` request:
 
 - Wake: only when `clientCapabilities._meta["buzz.wake"]` is an object with `version` equal to the number `1`. Any other value means that the client does not support wake requests.
 - Elicitation form or URL mode: only when `clientCapabilities.elicitation.form` (or `.url`) is present and not `null`. `{}` and `{"form": null}` do not enable form mode.
 
 A malformed capability value is treated as not supported. It does not fail `initialize`.
+
+### Turn abort
+
+When a run stops without a normal answer, the `session/prompt` result is still `end_turn`, and it carries the reason in `_meta["buzz.turnAbort"]`:
+
+```json
+{"stopReason": "end_turn", "_meta": {"buzz.turnAbort": {
+  "reason": "context_over_budget", "message": "<short reply, English>",
+  "resetSession": true, "usedTokens": 1473269, "budgetTokens": 206621}}}
+```
+
+| `reason` | Cause | `resetSession` | `usedTokens` / `budgetTokens` |
+|---|---|---|---|
+| `context_over_budget` | The conversation exceeds the model context after compaction. | `true`: the client drops the ACP session and the next message opens a new one. | History + pending tokens at the abort, and the history budget. |
+| `output_truncated` | The model output was cut off three times in a row. | `false` | Omitted. |
+
+`reason` is an open set; a client must accept unknown reasons (the adapter sets `resetSession` to `false` for them). `message` is English: the adapter connects to the Gateway without a locale, and `buzz.locale` is not read. A result without the key, and a cancelled result, behave as before.
+
+The Gateway also streams the over-budget reply as an `agent_message_chunk`. A client that posts `_meta.message` should not also post that chunk, or the user sees the notice twice.
+
+The adapter reads the abort from the `abort` object of the `chat.send` response ([19 — WebSocket RPC](19-websocket-rpc.md)). Against a Gateway that predates it, every prompt returns a bare `end_turn`.
 
 ### Thread context
 

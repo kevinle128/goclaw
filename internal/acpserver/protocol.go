@@ -73,6 +73,18 @@ const (
 	ThreadContextKey      = "buzz.thread"
 )
 
+// TurnAbortKey is the _meta key of a prompt result whose run stopped without a
+// normal answer, and of the matching agent capability (exactly {"version": 1}).
+// Clients that do not know the key see a plain end_turn result.
+const (
+	TurnAbortKey     = "buzz.turnAbort"
+	TurnAbortVersion = 1
+
+	// TurnAbortReasonContextOverBudget asks the client to drop the ACP session,
+	// because the session cannot continue.
+	TurnAbortReasonContextOverBudget = "context_over_budget"
+)
+
 // ClientCapabilities holds the client features that change agent behaviour.
 type ClientCapabilities struct {
 	ElicitationForm bool
@@ -162,7 +174,8 @@ type PromptParams struct {
 }
 
 type PromptResult struct {
-	StopReason string `json:"stopReason"`
+	StopReason string         `json:"stopReason"`
+	Meta       map[string]any `json:"_meta,omitempty"`
 }
 
 type CancelParams struct {
