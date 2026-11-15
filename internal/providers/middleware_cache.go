@@ -1,8 +1,9 @@
 package providers
 
 // CacheMiddleware injects OpenAI prompt caching params (prompt_cache_key,
-// prompt_cache_retention) for native OpenAI endpoints only.
-// Silently passes through for proxies and non-OpenAI providers.
+// prompt_cache_retention) for native OpenAI endpoints, and for proxies whose
+// provider config opts in (cfg.SendPromptCacheKey). Other proxies and
+// non-OpenAI providers get no change, because some reject unknown fields.
 func CacheMiddleware(body map[string]any, cfg MiddlewareConfig) map[string]any {
 	cacheKey, hasKey := cfg.Options[OptPromptCacheKey]
 	retention, hasRetention := cfg.Options[OptPromptCacheRetention]
@@ -11,8 +12,7 @@ func CacheMiddleware(body map[string]any, cfg MiddlewareConfig) map[string]any {
 		return body // no cache options requested
 	}
 
-	// Only inject for native OpenAI endpoints
-	if !isOpenAINativeEndpoint(cfg.APIBase) {
+	if !isOpenAINativeEndpoint(cfg.APIBase) && !cfg.SendPromptCacheKey {
 		return body
 	}
 

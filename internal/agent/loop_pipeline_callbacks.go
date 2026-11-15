@@ -338,6 +338,11 @@ func (l *Loop) makeCallLLM(req *RunRequest, emitRun func(AgentEvent)) func(ctx c
 		if tid := store.TenantIDFromContext(ctx); tid != uuid.Nil {
 			chatReq.Options[providers.OptTenantID] = tid.String()
 		}
+		// One stable cache key per tenant and agent, so every call of every run
+		// routes to the same provider cache. Without it, proxies such as 9router
+		// derive the cache session from message text, which differs on the first
+		// call of each run. Providers send it only to endpoints that accept it.
+		chatReq.Options[providers.OptPromptCacheKey] = promptCacheKey(l.tenantID, l.id)
 
 		// Reasoning decision: resolve effort level for thinking models (o3, DeepSeek-R1, Kimi).
 		reasoningDecision := providers.ResolveReasoningDecision(
@@ -716,4 +721,9 @@ func (l *Loop) reserveLLMUsageFor(ctx context.Context, req *RunRequest, iteratio
 		Messages:        chatReq.Messages,
 		MaxOutputTokens: l.maxOutputTokensFromRequest(chatReq),
 	})
+}
+
+// promptCacheKey builds the provider prompt cache key for an agent.
+func promptCacheKey(tenantID uuid.UUID, agentKey string) string {
+	return "goclaw:" + tenantID.String() + ":" + agentKey
 }

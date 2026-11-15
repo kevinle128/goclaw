@@ -23,6 +23,9 @@ type OpenAIProvider struct {
 	middlewares  RequestMiddleware // composed middleware chain (nil = no-op)
 	registry     ModelRegistry    // model resolution registry (nil = skip)
 	noAuthHeader bool             // when true, doRequest() skips setting Authorization (e.g. Vertex OAuth transport injects its own)
+	// sendPromptCacheKey lets CacheMiddleware send prompt cache params to a
+	// non-native endpoint that accepts them (opt-in per provider).
+	sendPromptCacheKey bool
 }
 
 func NewOpenAIProvider(name, apiKey, apiBase, defaultModel string) *OpenAIProvider {
@@ -94,6 +97,14 @@ func (p *OpenAIProvider) ExtraHeaders() map[string]string {
 	return out
 }
 
+// WithPromptCacheKey makes the provider send prompt_cache_key (and
+// prompt_cache_retention when set) to a non-native OpenAI-compatible endpoint.
+// Native OpenAI endpoints receive them without this setting.
+func (p *OpenAIProvider) WithPromptCacheKey(enabled bool) *OpenAIProvider {
+	p.sendPromptCacheKey = enabled
+	return p
+}
+
 // WithRegistry sets the model registry for forward-compat resolution.
 func (p *OpenAIProvider) WithRegistry(r ModelRegistry) *OpenAIProvider {
 	p.registry = r
@@ -158,6 +169,8 @@ func (p *OpenAIProvider) middlewareConfig(model string, req ChatRequest) Middlew
 		AuthType: "api_key",
 		APIBase:  p.apiBase,
 		Options:  req.Options,
+
+		SendPromptCacheKey: p.sendPromptCacheKey,
 	}
 }
 

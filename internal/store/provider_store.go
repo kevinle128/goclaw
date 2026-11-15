@@ -162,6 +162,23 @@ func ParseEmbeddingSettings(settings json.RawMessage) *EmbeddingSettings {
 	return s.Embedding
 }
 
+// ProviderSendsPromptCacheKey reports whether an OpenAI-compatible provider
+// accepts prompt_cache_key and prompt_cache_retention in the request body.
+// It is an explicit opt-in (settings.send_prompt_cache_key = true) because some
+// OpenAI-compatible servers reject unknown request fields.
+func ProviderSendsPromptCacheKey(settings json.RawMessage) bool {
+	if len(settings) == 0 {
+		return false
+	}
+	var s struct {
+		SendPromptCacheKey bool `json:"send_prompt_cache_key"`
+	}
+	if json.Unmarshal(settings, &s) != nil {
+		return false
+	}
+	return s.SendPromptCacheKey
+}
+
 // ParseChatGPTOAuthProviderSettings extracts provider-level Codex pool defaults from settings JSONB.
 func ParseChatGPTOAuthProviderSettings(settings json.RawMessage) *ChatGPTOAuthProviderSettings {
 	if len(settings) == 0 {

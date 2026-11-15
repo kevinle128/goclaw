@@ -331,6 +331,7 @@ func (h *ProvidersHandler) registerInMemory(p *store.LLMProviderData) providerRu
 		if p.ProviderType == store.ProviderMiniMax {
 			prov.WithChatPath("/text/chatcompletion_v2")
 		}
+		prov.WithPromptCacheKey(store.ProviderSendsPromptCacheKey(p.Settings))
 		h.providerReg.RegisterForTenant(p.TenantID, prov)
 	}
 	return providerRuntimeRegistered

@@ -72,6 +72,24 @@ func TestCacheMiddleware(t *testing.T) {
 			expected: map[string]any{"model": "gpt-4"},
 		},
 		{
+			name: "proxy endpoint with opt-in - cache params injected",
+			body: map[string]any{"model": "cx/gpt-test"},
+			cfg: MiddlewareConfig{
+				Provider:           "9router",
+				APIBase:            "http://proxy.example.com:20128/v1",
+				SendPromptCacheKey: true,
+				Options: map[string]any{
+					OptPromptCacheKey:       "test-key",
+					OptPromptCacheRetention: "24h",
+				},
+			},
+			expected: map[string]any{
+				"model":                  "cx/gpt-test",
+				"prompt_cache_key":       "test-key",
+				"prompt_cache_retention": "24h",
+			},
+		},
+		{
 			name: "azure endpoint - cache params ignored",
 			body: map[string]any{"model": "gpt-4"},
 			cfg: MiddlewareConfig{

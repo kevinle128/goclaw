@@ -419,6 +419,7 @@ func registerProvidersFromDB(registry *providers.Registry, provStore store.Provi
 			if p.ProviderType == store.ProviderOpenRouter {
 				prov.WithSiteInfo("https://goclaw.sh", "GoClaw")
 			}
+			prov.WithPromptCacheKey(store.ProviderSendsPromptCacheKey(p.Settings))
 			registry.RegisterForTenant(p.TenantID, prov)
 		}
 		slog.Info("registered provider from DB", "name", p.Name)

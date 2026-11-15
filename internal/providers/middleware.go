@@ -12,6 +12,9 @@ type MiddlewareConfig struct {
 	AuthType string               // "api_key", "oauth"
 	APIBase  string               // provider base URL
 	Options  map[string]any       // ChatRequest.Options passthrough
+	// SendPromptCacheKey allows prompt cache params on a non-native endpoint
+	// (an OpenAI-compatible proxy that the operator marked as accepting them).
+	SendPromptCacheKey bool
 }
 
 // ComposeMiddlewares chains middlewares left-to-right. Nil entries skipped.
