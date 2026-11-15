@@ -820,6 +820,86 @@ func TestPruneStage_StillOverAfterCompaction_ReturnsAbortRun(t *testing.T) {
 	}
 }
 
+func TestPruneStage_StillOverAfterCompaction_FitHistoryContinues(t *testing.T) {
+	t.Parallel()
+	var fitBudget int
+	deps := &PipelineDeps{
+		Config:       PipelineConfig{ContextWindow: 1000, MaxTokens: 100},
+		TokenCounter: &mockTokenCounter{countPerMessage: 100},
+		PruneMessages: func(msgs []providers.Message, _ int) ([]providers.Message, PruneStats) {
+			return msgs, PruneStats{}
+		},
+		CompactMessages: func(_ context.Context, msgs []providers.Message, _ string) ([]providers.Message, error) {
+			return msgs, nil
+		},
+		FitHistory: func(msgs []providers.Message, budget int, _ string) ([]providers.Message, FitStats) {
+			fitBudget = budget
+			return msgs[len(msgs)-2:], FitStats{Dropped: len(msgs) - 2}
+		},
+		OverBudgetMessage: func(context.Context) string { return "too long" },
+	}
+	stage := NewPruneStage(deps, nil)
+	state := defaultState()
+	history := make([]providers.Message, 50)
+	for i := range history {
+		history[i] = providers.Message{Role: "user", Content: "msg"}
+	}
+	state.Messages.SetHistory(history)
+	state.Messages.AppendPending(providers.Message{Role: "assistant", Content: "pending"})
+
+	if err := stage.Execute(context.Background(), state); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if stage.Result() != Continue {
+		t.Fatalf("Result() = %v, want Continue after FitHistory", stage.Result())
+	}
+	// budget 900 minus 100 tokens of pending.
+	if fitBudget != 800 {
+		t.Errorf("FitHistory budget = %d, want 800", fitBudget)
+	}
+	if got := len(state.Messages.Pending()); got != 1 {
+		t.Errorf("pending messages = %d, want 1", got)
+	}
+	if state.Observe.FinalContent != "" {
+		t.Errorf("FinalContent = %q, want empty", state.Observe.FinalContent)
+	}
+}
+
+func TestPruneStage_StillOverAfterFit_AbortsWithReply(t *testing.T) {
+	t.Parallel()
+	deps := &PipelineDeps{
+		Config:       PipelineConfig{ContextWindow: 1000, MaxTokens: 100},
+		TokenCounter: &mockTokenCounter{countPerMessage: 100},
+		PruneMessages: func(msgs []providers.Message, _ int) ([]providers.Message, PruneStats) {
+			return msgs, PruneStats{}
+		},
+		CompactMessages: func(_ context.Context, msgs []providers.Message, _ string) ([]providers.Message, error) {
+			return msgs, nil
+		},
+		FitHistory: func(msgs []providers.Message, _ int, _ string) ([]providers.Message, FitStats) {
+			return msgs, FitStats{}
+		},
+		OverBudgetMessage: func(context.Context) string { return "too long" },
+	}
+	stage := NewPruneStage(deps, nil)
+	state := defaultState()
+	history := make([]providers.Message, 50)
+	for i := range history {
+		history[i] = providers.Message{Role: "user", Content: "msg"}
+	}
+	state.Messages.SetHistory(history)
+
+	if err := stage.Execute(context.Background(), state); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	if stage.Result() != AbortRun {
+		t.Fatalf("Result() = %v, want AbortRun", stage.Result())
+	}
+	if state.Observe.FinalContent != "too long" {
+		t.Errorf("FinalContent = %q, want the over-budget reply", state.Observe.FinalContent)
+	}
+}
+
 func TestPruneStage_ZeroBudget_NoOp(t *testing.T) {
 	t.Parallel()
 	deps := &PipelineDeps{

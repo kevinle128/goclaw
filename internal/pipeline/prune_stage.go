@@ -204,11 +204,52 @@ func (s *PruneStage) Execute(ctx context.Context, state *RunState) error {
 	state.Prune.HistoryTokens = historyTokens
 
 	if historyTokens > budget {
+		historyTokens = s.fitHistory(state, sessionKey, budget, historyTokens)
+	}
+
+	if historyTokens > budget {
 		slog.Warn("still over budget after compaction", "tokens", historyTokens, "budget", budget)
+		// Without a final reply the client gets nothing, and the user cannot
+		// tell that this session will keep failing.
+		if s.deps.OverBudgetMessage != nil {
+			state.Observe.FinalContent = s.deps.OverBudgetMessage(ctx)
+		}
 		s.result = AbortRun
 	}
 
 	return nil
+}
+
+// fitHistory applies the deterministic FitHistory fallback and returns the new
+// history + pending token count. Pending messages stay untouched: they hold the
+// current iteration's assistant(tool_calls) message.
+func (s *PruneStage) fitHistory(state *RunState, sessionKey string, budget, historyTokens int) int {
+	if s.deps.FitHistory == nil {
+		return historyTokens
+	}
+	pendingTokens := 0
+	if p := state.Messages.Pending(); len(p) > 0 && s.deps.TokenCounter != nil {
+		pendingTokens = s.deps.TokenCounter.CountMessages(state.Model, p)
+	}
+	historyBudget := budget - pendingTokens
+	if historyBudget <= 0 {
+		return historyTokens
+	}
+	fitted, stats := s.deps.FitHistory(state.Messages.History(), historyBudget, state.Model)
+	state.Messages.SetHistory(fitted)
+	after := s.countHistory(state)
+	state.Prune.HistoryTokens = after
+	slog.Info("context.pruned",
+		"session_key", sessionKey,
+		"tokens_before", historyTokens,
+		"tokens_after", after,
+		"trimmed", stats.ResultsTrimmed,
+		"cleared", stats.ResultsCleared,
+		"bodies_trimmed", stats.BodiesTrimmed,
+		"dropped", stats.Dropped,
+		"trigger", "fit",
+	)
+	return after
 }
 
 // countHistory counts history + pending tokens via TokenCounter.

@@ -372,5 +372,7 @@ func init() {
 		MsgACPSubscribeLimit:   "too many wake subscriptions on this connection",
 		MsgACPRequestNotFound:  "ACP request not found or already answered",
 		MsgACPRequestNotOwner:  "ACP request belongs to another connection or run",
+
+		MsgContextTooLong: "This conversation is too long for the model, even after trimming old content. Please start a new thread and repeat your question.",
 	})
 }

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -201,5 +203,37 @@ func TestMaybeSummarize_ToolChainBoundary(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for maybeSummarize to truncate history")
+	}
+}
+
+// singleTurnToolChain models a session whose history is one user turn followed
+// by a long tool chain: every message after the first user is a tool call or
+// a tool result, so there is no clean split point for compaction.
+func singleTurnToolChain(n int, body string) []providers.Message {
+	msgs := []providers.Message{{Role: "user", Content: "u0 " + body}}
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("call-%d", i)
+		msgs = append(msgs,
+			providers.Message{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: id, Name: "graylog_search"}}},
+			providers.Message{Role: "tool", ToolCallID: id, Content: body},
+		)
+	}
+	return append(msgs, providers.Message{Role: "user", Content: "latest question"})
+}
+
+// TestCompactMessagesInPlace_SingleTurnToolChainCannotSplit shows why an
+// over-budget session with few but huge messages is not compacted: the split
+// index walks back through the whole tool chain to the start, so compaction
+// returns nil without calling the provider.
+func TestCompactMessagesInPlace_SingleTurnToolChainCannotSplit(t *testing.T) {
+	cap := &capturingProvider{response: "summary"}
+	loop := &Loop{provider: cap, model: "claude-3-5-sonnet"}
+
+	msgs := singleTurnToolChain(5, strings.Repeat("x", 1000))
+	if got := loop.compactMessagesInPlace(context.Background(), msgs); got != nil {
+		t.Fatalf("compactMessagesInPlace returned %d messages, want nil", len(got))
+	}
+	if len(cap.captured) != 0 {
+		t.Fatalf("provider called %d time(s), want 0", len(cap.captured))
 	}
 }

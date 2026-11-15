@@ -5,6 +5,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/eventbus"
+	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/memory"
 	"github.com/nextlevelbuilder/goclaw/internal/pipeline"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
@@ -68,8 +69,9 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 		})
 	}
 
+	tokenCounter := tokencount.NewTiktokenCounter()
 	return pipeline.PipelineDeps{
-		TokenCounter: tokencount.NewTiktokenCounter(),
+		TokenCounter: tokenCounter,
 		EventBus:     l.domainBus,
 		Hooks:        l.hookDispatcher,
 		Config: pipeline.PipelineConfig{
@@ -129,6 +131,22 @@ func (l *Loop) buildPipelineDeps(req *RunRequest, bridgeRS *runState) pipeline.P
 		PruneMessages:   cb.pruneMessages,
 		SanitizeHistory: cb.sanitizeHistory,
 		CompactMessages: cb.compactMessages,
+		FitHistory: func(msgs []providers.Message, budget int, model string) ([]providers.Message, pipeline.FitStats) {
+			placeholder := resolvePruningSettings(l.contextPruningCfg).hardClearPlaceholder
+			return fitHistoryToBudget(msgs, budget, tokenCounter, model, placeholder)
+		},
+		OverBudgetMessage: func(ctx context.Context) string {
+			msg := i18n.T(store.LocaleFromContext(ctx), i18n.MsgContextTooLong)
+			// Stream clients (ACP) show only chunk events, and this reply comes
+			// from no LLM call, so send it as a chunk like streamed LLM text.
+			cb.emitRun(AgentEvent{
+				Type:    protocol.ChatEventChunk,
+				AgentID: l.id,
+				RunID:   req.RunID,
+				Payload: map[string]string{"content": msg},
+			})
+			return msg
+		},
 
 		// Cache-TTL gate callbacks (Phase 06)
 		GetProviderCaps: func() providers.ProviderCapabilities {

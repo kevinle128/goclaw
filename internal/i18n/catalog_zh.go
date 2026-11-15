@@ -372,5 +372,7 @@ func init() {
 		MsgACPSubscribeLimit:   "此连接的唤醒订阅过多",
 		MsgACPRequestNotFound:  "未找到 ACP 请求或请求已被回答",
 		MsgACPRequestNotOwner:  "ACP 请求属于其他连接或运行",
+
+		MsgContextTooLong: "此对话过长，即使裁剪旧内容后仍超出模型的上下文限制。请开启新的对话线程并重新提问。",
 	})
 }

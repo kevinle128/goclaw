@@ -382,4 +382,7 @@ const (
 	MsgACPSubscribeLimit   = "error.acp_subscribe_limit"   // "too many wake subscriptions on this connection"
 	MsgACPRequestNotFound  = "error.acp_request_not_found" // "ACP request not found or already answered"
 	MsgACPRequestNotOwner  = "error.acp_request_not_owner" // "ACP request belongs to another connection or run"
+
+	// --- Agent run ---
+	MsgContextTooLong = "error.context_too_long" // conversation exceeds the model context even after trimming
 )

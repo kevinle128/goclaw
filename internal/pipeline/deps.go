@@ -21,6 +21,14 @@ type PruneStats struct {
 	Compacted      bool // LLM compaction ran this cycle
 }
 
+// FitStats counts what the deterministic history fit changed.
+type FitStats struct {
+	ResultsTrimmed int // tool results cut to head + tail
+	ResultsCleared int // tool results replaced by the placeholder
+	BodiesTrimmed  int // user/assistant bodies cut to head + tail
+	Dropped        int // oldest messages removed
+}
+
 // PipelineDeps bundles all external dependencies stages need.
 // Passed to NewDefaultPipeline; individual stages receive what they need via closure or direct field access.
 type PipelineDeps struct {
@@ -71,6 +79,14 @@ type PipelineDeps struct {
 	PruneMessages   func(msgs []providers.Message, budget int) ([]providers.Message, PruneStats)
 	SanitizeHistory func(msgs []providers.Message) ([]providers.Message, int)
 	CompactMessages func(ctx context.Context, msgs []providers.Message, model string) ([]providers.Message, error)
+	// FitHistory reduces history without an LLM call when pruning and compaction
+	// leave it over budget (for example a few huge messages that compaction
+	// cannot split). Optional: nil keeps the abort behavior.
+	FitHistory func(msgs []providers.Message, budget int, model string) ([]providers.Message, FitStats)
+	// OverBudgetMessage returns the user-visible reply used as final content
+	// when the run must stop because history still exceeds the budget. The
+	// callback also delivers it to stream clients. Optional.
+	OverBudgetMessage func(ctx context.Context) string
 
 	// Cache-TTL gate callbacks (Phase 06). All optional (nil = feature disabled).
 	GetProviderCaps  func() providers.ProviderCapabilities // provider capabilities for cache detection
