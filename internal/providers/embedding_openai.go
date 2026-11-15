@@ -108,6 +108,7 @@ func (p *OpenAIEmbeddingProvider) embedBatch(ctx context.Context, texts []string
 				Status:     resp.StatusCode,
 				Body:       string(body),
 				RetryAfter: ParseRetryAfter(resp.Header.Get("Retry-After")),
+				Header:     resp.Header.Clone(),
 			}
 		}
 

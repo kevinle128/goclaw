@@ -177,6 +177,7 @@ func (p *CodexProvider) doRequest(ctx context.Context, body any) (io.ReadCloser,
 			Status:     resp.StatusCode,
 			Body:       fmt.Sprintf("%s: %s", p.name, string(respBody)),
 			RetryAfter: retryAfter,
+			Header:     resp.Header.Clone(),
 		}
 	}
 

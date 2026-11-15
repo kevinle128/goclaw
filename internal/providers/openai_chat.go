@@ -13,6 +13,7 @@ import (
 
 func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	model := p.resolveModel(req.Model)
+	ctx = WithRetryLabels(ctx, p.name, model)
 	body := p.buildRequestBody(model, req, false)
 	body = ApplyMiddlewares(body, p.middlewares, p.middlewareConfig(model, req))
 
@@ -61,6 +62,7 @@ func (p *OpenAIProvider) chatRequestFn(ctx context.Context, body map[string]any)
 
 func (p *OpenAIProvider) ChatStream(ctx context.Context, req ChatRequest, onChunk func(StreamChunk)) (*ChatResponse, error) {
 	model := p.resolveModel(req.Model)
+	ctx = WithRetryLabels(ctx, p.name, model)
 	// stripThinking suppresses user-visible reasoning while leaving
 	// Usage.ThinkingTokens untouched (the usage chunk below still records it).
 	stripThinking, _ := req.Options[OptStripThinking].(bool)

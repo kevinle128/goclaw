@@ -134,6 +134,7 @@ func (p *AnthropicProvider) middlewareConfig(model string, req ChatRequest) Midd
 
 func (p *AnthropicProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	model := resolveAnthropicModel(req.Model, p.defaultModel, p.registry)
+	ctx = WithRetryLabels(ctx, "anthropic", model)
 
 	body := p.buildRequestBody(model, req, false)
 	body = ApplyMiddlewares(body, p.middlewares, p.middlewareConfig(model, req))
@@ -198,6 +199,7 @@ func (p *AnthropicProvider) doRequest(ctx context.Context, body any) (io.ReadClo
 			Status:     resp.StatusCode,
 			Body:       fmt.Sprintf("anthropic: %s", string(respBody)),
 			RetryAfter: retryAfter,
+			Header:     resp.Header.Clone(),
 		}
 	}
 

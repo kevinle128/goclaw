@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,16 @@ type RetryConfig struct {
 	MinDelay time.Duration // initial delay (default 300ms)
 	MaxDelay time.Duration // delay cap (default 30s)
 	Jitter   float64       // jitter factor ±N (default 0.1 = ±10%)
+
+	// Rate-limit waiting: when the provider reports a rate limit together with a
+	// wait time, RetryDo waits that long and retries the same request. Zero
+	// values disable the feature (RateLimitMaxAttempts <= 0).
+	RateLimitMaxWait      time.Duration // longest single wait; a longer reported wait fails the call
+	RateLimitMaxAttempts  int           // max rate-limit waits per call
+	RateLimitMaxTotalWait time.Duration // max sum of rate-limit waits per call
+
+	// Sleep waits for d or until ctx ends. Nil uses a timer. Tests inject a fake.
+	Sleep func(ctx context.Context, d time.Duration) error
 }
 
 // RetryHookFunc is called before each retry attempt.
@@ -41,12 +52,14 @@ func retryHookFromContext(ctx context.Context) RetryHookFunc {
 
 // DefaultRetryConfig returns sensible defaults matching TS provider retry behavior.
 func DefaultRetryConfig() RetryConfig {
-	return RetryConfig{
+	cfg := RetryConfig{
 		Attempts: 3,
 		MinDelay: 300 * time.Millisecond,
 		MaxDelay: 30 * time.Second,
 		Jitter:   0.1,
 	}
+	applyRateLimitDefaults(&cfg)
+	return cfg
 }
 
 // HTTPError represents an HTTP error with status code and optional Retry-After.
@@ -54,6 +67,7 @@ type HTTPError struct {
 	Status     int
 	Body       string
 	RetryAfter time.Duration // parsed from Retry-After header (0 if absent)
+	Header     http.Header   // response headers (nil when unavailable); read for rate-limit reset hints
 }
 
 func (e *HTTPError) Error() string {
@@ -111,6 +125,7 @@ func RetryDo[T any](ctx context.Context, cfg RetryConfig, fn func() (T, error)) 
 
 	var lastErr error
 	var zero T
+	var budget rateLimitBudget
 
 	for attempt := 1; attempt <= cfg.Attempts; attempt++ {
 		result, err := fn()
@@ -119,6 +134,20 @@ func RetryDo[T any](ctx context.Context, cfg RetryConfig, fn func() (T, error)) 
 		}
 
 		lastErr = err
+
+		// A rate limit that reports its wait time is waited out and the same
+		// request is retried. It does not use up a regular attempt.
+		wait, action := budget.next(cfg, err)
+		switch action {
+		case rateLimitWait:
+			if sleepErr := budget.wait(ctx, cfg, wait, err); sleepErr != nil {
+				return zero, sleepErr
+			}
+			attempt--
+			continue
+		case rateLimitGiveUp:
+			return zero, err
+		}
 
 		// Don't retry if not retryable or last attempt
 		if !IsRetryableError(err) || attempt == cfg.Attempts {
@@ -191,10 +220,13 @@ func ParseRetryAfter(value string) time.Duration {
 		return time.Duration(seconds) * time.Second
 	}
 
-	// Try HTTP-date format
-	if t, err := time.Parse(time.RFC1123, value); err == nil {
-		d := time.Until(t)
-		if d > 0 {
+	// Try HTTP-date format: IMF-fixdate, RFC 850 and asctime forms, then plain RFC 1123.
+	t, err := http.ParseTime(value)
+	if err != nil {
+		t, err = time.Parse(time.RFC1123, value)
+	}
+	if err == nil {
+		if d := time.Until(t); d > 0 {
 			return d
 		}
 	}

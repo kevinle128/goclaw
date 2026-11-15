@@ -136,13 +136,36 @@ func (p *CodexProvider) ChatStream(ctx context.Context, req ChatRequest, onChunk
 		cfg.Attempts = 1
 	}
 
+	model := req.Model
+	if model == "" {
+		model = p.defaultModel
+	}
+	ctx = WithRetryLabels(ctx, p.name, model)
+
 	var lastErr error
+	var budget rateLimitBudget
 	for attempt := 1; attempt <= cfg.Attempts; attempt++ {
 		result, emitted, err := p.chatStreamOnce(ctx, req, onChunk)
 		if err == nil {
 			return result, nil
 		}
 		lastErr = err
+
+		// A rate limit that reports its wait is waited out and the same request
+		// retried, but only while nothing has been streamed to the caller.
+		if !emitted {
+			wait, action := budget.next(cfg, err)
+			switch action {
+			case rateLimitWait:
+				if sleepErr := budget.wait(ctx, cfg, wait, err); sleepErr != nil {
+					return result, sleepErr
+				}
+				attempt--
+				continue
+			case rateLimitGiveUp:
+				return result, err
+			}
+		}
 
 		// If any user-visible chunk already escaped, do not replay the run: retrying
 		// could duplicate streamed text/tool calls/images. Pre-output Codex backend

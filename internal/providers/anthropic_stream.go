@@ -10,6 +10,7 @@ import (
 
 func (p *AnthropicProvider) ChatStream(ctx context.Context, req ChatRequest, onChunk func(StreamChunk)) (*ChatResponse, error) {
 	model := resolveAnthropicModel(req.Model, p.defaultModel, p.registry)
+	ctx = WithRetryLabels(ctx, "anthropic", model)
 	// stripThinking: when true, drop reasoning tokens from user-visible output.
 	// Billing counters (thinkingChars → Usage.ThinkingTokens) and tool-passback
 	// RawAssistantContent remain untouched so billing and Anthropic's thinking
