@@ -96,6 +96,16 @@ func (p *Pipeline) Run(ctx context.Context, state *RunState) (*RunResult, error)
 				state.ExitCode = Continue
 				continue
 			}
+			// A follow-up can land after the last observe drain. Without this
+			// second drain the run would finish while the message sits unread
+			// in the inject channel, and the sender has already been told it
+			// was accepted. Only drain when another iteration is allowed and
+			// the run is still live.
+			if p.drainLateInjection(ctx, state) {
+				state.Observe.ContinueAfterFinal = false
+				state.ExitCode = Continue
+				continue
+			}
 			break
 		}
 		if ctx.Err() != nil {
@@ -119,4 +129,28 @@ func (p *Pipeline) Run(ctx context.Context, state *RunState) (*RunResult, error)
 		result.Duration = time.Nanosecond
 	}
 	return result, nil
+}
+
+// drainLateInjection reads the inject channel once more after the run decided
+// to finish. It reports true when it queued follow-up messages behind the final
+// answer and the loop should run another iteration.
+func (p *Pipeline) drainLateInjection(ctx context.Context, state *RunState) bool {
+	if p.Deps.DrainInjectCh == nil || ctx.Err() != nil {
+		return false
+	}
+	// Only a model answer without tool calls can be followed by a user
+	// message. A run that stopped for another reason (for example a killed
+	// tool loop) must not resume.
+	if resp := state.Think.LastResponse; resp == nil || len(resp.ToolCalls) > 0 {
+		return false
+	}
+	if state.Iteration+1 >= p.Deps.Config.MaxIterations {
+		return false
+	}
+	injected := p.Deps.DrainInjectCh()
+	if len(injected) == 0 {
+		return false
+	}
+	continueAfterFinal(state, state.Observe.FinalContent, state.Observe.FinalThinking, injected)
+	return true
 }

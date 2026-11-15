@@ -60,11 +60,17 @@ func (s *ObserveStage) observeFinalResponse(state *RunState, resp *providers.Cha
 		state.Observe.FinalThinking = resp.Thinking
 		return
 	}
+	continueAfterFinal(state, resp.Content, resp.Thinking, injected)
+}
 
+// continueAfterFinal keeps the model's final answer as runtime-only context,
+// queues the injected follow-up messages behind it and asks the pipeline for
+// another iteration so the follow-up is answered in the same run.
+func continueAfterFinal(state *RunState, content, thinking string, injected []providers.Message) {
 	state.Messages.AppendPending(providers.Message{
 		Role:      "assistant",
-		Content:   resp.Content,
-		Thinking:  resp.Thinking,
+		Content:   content,
+		Thinking:  thinking,
 		Transient: true,
 	})
 	appendPendingMessages(state, injected)
