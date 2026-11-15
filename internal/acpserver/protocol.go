@@ -19,6 +19,11 @@ const (
 	CodeInternalError  = -32603
 	CodeGatewayError   = -32000
 	CodeUnknownSession = -32002
+	// CodeSteerNotApplied answers _session/steering when the message did not
+	// join a running turn. It is an application error on purpose: Buzz treats
+	// -32601 and a result without an outcome as "cancel the turn and merge",
+	// and every other code as "keep the turn and run the message after it".
+	CodeSteerNotApplied = -32003
 )
 
 type RPCError struct {
@@ -56,6 +61,9 @@ type InitializeResult struct {
 	AgentCapabilities AgentCapabilities `json:"agentCapabilities"`
 	AgentInfo         AgentInfo         `json:"agentInfo"`
 	AuthMethods       []any             `json:"authMethods"`
+	// Meta is the ROOT _meta of the initialize result. Buzz reads
+	// _meta.steering.supported here, not under agentCapabilities._meta.
+	Meta map[string]any `json:"_meta,omitempty"`
 }
 
 type AgentCapabilities struct {
@@ -71,6 +79,15 @@ const (
 	WakeCapabilityKey     = "buzz.wake"
 	WakeCapabilityVersion = 1
 	ThreadContextKey      = "buzz.thread"
+)
+
+// SteeringCapabilityKey is the root _meta key of the initialize result that
+// tells the client the agent accepts _session/steering mid-turn.
+const (
+	SteeringCapabilityKey = "steering"
+	SteeringMethod        = "_session/steering"
+	// SteerOutcomeInjected is the only outcome that keeps the turn alive.
+	SteerOutcomeInjected = "injected"
 )
 
 // TurnAbortKey is the _meta key of a prompt result whose run stopped without a
@@ -176,6 +193,19 @@ type PromptParams struct {
 type PromptResult struct {
 	StopReason string         `json:"stopReason"`
 	Meta       map[string]any `json:"_meta,omitempty"`
+}
+
+// SteerParams are the params of _session/steering: the session and the text
+// blocks to add to the running turn.
+type SteerParams struct {
+	SessionID string        `json:"sessionId"`
+	Prompt    []TextContent `json:"prompt"`
+}
+
+// SteerResult is the result of _session/steering. Outcome is always
+// SteerOutcomeInjected; every other case is an RPC error.
+type SteerResult struct {
+	Outcome string `json:"outcome"`
 }
 
 type CancelParams struct {
@@ -320,6 +350,34 @@ func decodeThreadContext(meta json.RawMessage) (json.RawMessage, *RPCError) {
 		return nil, invalidParams()
 	}
 	return json.RawMessage(compact.Bytes()), nil
+}
+
+// DecodeSteerParams reads _session/steering params with the same rules as a
+// prompt: a session id and text blocks with non-empty text, under the prompt
+// size limit. Unknown _meta content is ignored.
+func DecodeSteerParams(raw json.RawMessage) (SteerParams, *RPCError) {
+	var wire struct {
+		SessionID *string           `json:"sessionId"`
+		Prompt    []json.RawMessage `json:"prompt"`
+		Meta      json.RawMessage   `json:"_meta,omitempty"`
+	}
+	if err := decodeStrict(raw, &wire); err != nil || wire.SessionID == nil || *wire.SessionID == "" || len(wire.Prompt) == 0 {
+		return SteerParams{}, invalidParams()
+	}
+	params := SteerParams{SessionID: *wire.SessionID, Prompt: make([]TextContent, 0, len(wire.Prompt))}
+	textBytes := 0
+	for _, block := range wire.Prompt {
+		var text TextContent
+		if err := decodeStrict(block, &text); err != nil || text.Type != "text" || text.Text == "" {
+			return SteerParams{}, invalidParams()
+		}
+		textBytes += len(text.Text)
+		if textBytes > MaxPromptTextBytes {
+			return SteerParams{}, invalidParams()
+		}
+		params.Prompt = append(params.Prompt, text)
+	}
+	return params, nil
 }
 
 func DecodeCancelParams(raw json.RawMessage) (CancelParams, *RPCError) {

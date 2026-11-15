@@ -29,6 +29,10 @@ type ServerConfig struct {
 	// MaxPromptDuration cancels a prompt that runs longer. Zero selects
 	// MaxPromptDurationDefault.
 	MaxPromptDuration time.Duration
+	// Steering lets a follow-up message join the running turn. When false,
+	// initialize does not advertise steering and the client cancels and
+	// merges instead.
+	Steering bool
 }
 
 type Server struct {
@@ -38,6 +42,7 @@ type Server struct {
 	version       string
 	mcpExecRoots  []string
 	sessions      *SessionRegistry
+	steering      bool
 	mu            sync.Mutex
 	transport     *Transport
 	closed        bool
@@ -62,7 +67,7 @@ func NewServer(config ServerConfig) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve ACP workspace root: %w", err)
 	}
-	server := &Server{gateway: config.Gateway, agentID: config.AgentID, workspaceRoot: root, version: config.Version, mcpExecRoots: append([]string(nil), config.MCPExecRoots...), sessions: NewSessionRegistry(config.MaxPromptDuration), wakeSlots: make(chan struct{}, MaxConcurrentWakes)}
+	server := &Server{gateway: config.Gateway, agentID: config.AgentID, workspaceRoot: root, version: config.Version, mcpExecRoots: append([]string(nil), config.MCPExecRoots...), sessions: NewSessionRegistry(config.MaxPromptDuration), steering: config.Steering, wakeSlots: make(chan struct{}, MaxConcurrentWakes)}
 	config.Gateway.SetWakeHandler(server.handleGatewayWake)
 	return server, nil
 }
@@ -77,7 +82,11 @@ func (s *Server) Run(ctx context.Context, input io.Reader, output io.Writer) err
 		s.mu.Unlock()
 		return errors.New("ACP server is already running")
 	}
-	transport := NewTransport(input, output, Handler{NewSession: s.handleNewSession, Prompt: s.handlePrompt, Cancel: s.handleCancel, Initialized: s.handleInitialized, HasSession: s.hasSession}, s.version)
+	handler := Handler{NewSession: s.handleNewSession, Prompt: s.handlePrompt, Cancel: s.handleCancel, Initialized: s.handleInitialized, HasSession: s.hasSession}
+	if s.steering {
+		handler.Steer = s.handleSteering
+	}
+	transport := NewTransport(input, output, handler, s.version)
 	s.transport = transport
 	lifeCtx, stopLife := context.WithCancel(ctx)
 	s.lifeCtx = lifeCtx
@@ -326,6 +335,30 @@ func (s *Server) handlePrompt(ctx context.Context, params PromptParams) (PromptR
 			return PromptResult{StopReason: "cancelled"}, nil
 		}
 	}
+}
+
+// handleSteering adds a follow-up message to the turn that is running on the
+// session. It answers "injected" only when the gateway queued the message into
+// the active run. Every other case is a CodeSteerNotApplied error: the client
+// then keeps its turn and runs the message afterwards, so nothing is lost and
+// no turn is cancelled. It never starts a turn and never waits for the run to
+// read the message.
+func (s *Server) handleSteering(ctx context.Context, params SteerParams) (SteerResult, error) {
+	notApplied := &RPCError{Code: CodeSteerNotApplied, Message: "Steering not applied"}
+	sessionKey, _, active := s.sessions.ActivePromptKey(params.SessionID)
+	if !active {
+		return SteerResult{}, notApplied
+	}
+	response, err := s.gateway.ChatSteer(ctx, ChatSteerRequest{SessionKey: sessionKey, Message: joinPrompt(params.Prompt)})
+	if err != nil {
+		slog.Warn("acp.steer.gateway_error", "error", err)
+		return SteerResult{}, notApplied
+	}
+	if !response.Injected {
+		slog.Info("acp.steer.not_injected", "reason", response.Reason)
+		return SteerResult{}, notApplied
+	}
+	return SteerResult{Outcome: SteerOutcomeInjected}, nil
 }
 
 // promptResultFor builds the result of a completed prompt. A run that stopped

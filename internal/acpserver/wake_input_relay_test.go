@@ -137,6 +137,11 @@ const wakeCaps = `{"elicitation":{"form":{}},"_meta":{"buzz.wake":{"version":1}}
 
 func startACPHarness(t *testing.T, gatewayURL, capabilities string) *acpHarness {
 	t.Helper()
+	return startACPHarnessSteering(t, gatewayURL, capabilities, false)
+}
+
+func startACPHarnessSteering(t *testing.T, gatewayURL, capabilities string, steering bool) *acpHarness {
+	t.Helper()
 	gateway := NewGatewayClient(GatewayClientConfig{URL: gatewayURL, Token: "secret"})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -148,7 +153,7 @@ func startACPHarness(t *testing.T, gatewayURL, capabilities string) *acpHarness 
 	if err := os.Mkdir(cwd, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(ServerConfig{Gateway: gateway, AgentID: "resolver", WorkspaceRoot: root})
+	server, err := NewServer(ServerConfig{Gateway: gateway, AgentID: "resolver", WorkspaceRoot: root, Steering: steering})
 	if err != nil {
 		t.Fatal(err)
 	}

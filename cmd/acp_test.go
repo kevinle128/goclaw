@@ -97,6 +97,37 @@ func TestACPCommandPassesRequiredOptions(t *testing.T) {
 	if got.MaxPromptDuration != 2*time.Hour {
 		t.Fatalf("default max prompt duration = %v, want 2h", got.MaxPromptDuration)
 	}
+	if !got.Steering {
+		t.Fatal("steering must be on by default")
+	}
+}
+
+func TestACPCommandSteeringFlagTurnsSteeringOff(t *testing.T) {
+	oldRun := runACPCommand
+	t.Cleanup(func() { runACPCommand = oldRun })
+	var got acpOptions
+	runACPCommand = func(_ context.Context, options acpOptions, _ io.Reader, _, _ io.Writer) error {
+		got = options
+		return nil
+	}
+	cmd := acpCmd()
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SetArgs([]string{
+		"--agent", "coding-agent",
+		"--owner", "user-1",
+		"--tenant", "00000000-0000-0000-0000-000000000001",
+		"--workspace-root", t.TempDir(),
+		"--mcp-exec-root", t.TempDir(),
+		"--steering=false",
+	})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got.Steering {
+		t.Fatal("--steering=false did not turn steering off")
+	}
 }
 
 func TestACPCommandParsesMaxPromptDuration(t *testing.T) {

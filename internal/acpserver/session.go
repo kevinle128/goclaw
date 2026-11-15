@@ -178,6 +178,22 @@ func (r *SessionRegistry) PromptContext(id string, generation uint64) (PromptCon
 	return PromptContext{SessionID: record.ID, SessionKey: record.SessionKey, Thread: bytes.Clone(record.active.thread)}, true
 }
 
+// ActivePromptKey returns the gateway session key and generation of the
+// session's active prompt. It reports false when the session is unknown,
+// removed or has no prompt running.
+func (r *SessionRegistry) ActivePromptKey(id string) (sessionKey string, generation uint64, ok bool) {
+	record, found := r.Get(id)
+	if !found {
+		return "", 0, false
+	}
+	record.mu.Lock()
+	defer record.mu.Unlock()
+	if record.removed || record.active == nil {
+		return "", 0, false
+	}
+	return record.SessionKey, record.active.generation, true
+}
+
 func (r *SessionRegistry) SetRunID(id string, generation uint64, runID string) bool {
 	record, ok := r.Get(id)
 	if !ok {

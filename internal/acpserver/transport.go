@@ -29,6 +29,9 @@ type Handler struct {
 	NewSession func(context.Context, NewSessionParams) (NewSessionResult, error)
 	Prompt     func(context.Context, PromptParams) (PromptResult, error)
 	Cancel     func(context.Context, CancelParams)
+	// Steer handles _session/steering. When nil, the method is not offered
+	// and initialize does not advertise steering.
+	Steer func(context.Context, SteerParams) (SteerResult, error)
 	// HasSession, when set, reports whether the server still holds a session.
 	// The server can drop a session; the transport then refuses its id.
 	HasSession func(string) bool
@@ -441,6 +444,20 @@ func (t *Transport) dispatch(ctx context.Context, line []byte) error {
 			}
 			return t.handler.Prompt(requestCtx, params)
 		})
+	case SteeringMethod:
+		if t.handler.Steer == nil {
+			return t.sendError(ctx, id, &RPCError{Code: CodeMethodNotFound, Message: "Method not found"})
+		}
+		params, rpcErr := DecodeSteerParams(msg.Params)
+		if rpcErr != nil {
+			return t.sendError(ctx, id, rpcErr)
+		}
+		if !t.hasSession(params.SessionID) {
+			return t.sendError(ctx, id, &RPCError{Code: CodeUnknownSession, Message: "Unknown session"})
+		}
+		return t.startRequest(ctx, id, func(requestCtx context.Context) (any, error) {
+			return t.handler.Steer(requestCtx, params)
+		})
 	default:
 		return t.sendError(ctx, id, &RPCError{Code: CodeMethodNotFound, Message: "Method not found"})
 	}
@@ -485,6 +502,10 @@ func (t *Transport) initialize(ctx context.Context, id, raw json.RawMessage) err
 	t.state.clientCapabilities = caps
 	t.stateMu.Unlock()
 
+	var rootMeta map[string]any
+	if t.handler.Steer != nil {
+		rootMeta = map[string]any{SteeringCapabilityKey: map[string]bool{"supported": true}}
+	}
 	err := t.sendResult(ctx, id, InitializeResult{
 		ProtocolVersion: ProtocolVersion,
 		AgentCapabilities: AgentCapabilities{
@@ -498,6 +519,7 @@ func (t *Transport) initialize(ctx context.Context, id, raw json.RawMessage) err
 		},
 		AgentInfo:   AgentInfo{Name: "goclaw", Title: "GoClaw", Version: t.agentVersion},
 		AuthMethods: []any{},
+		Meta:        rootMeta,
 	})
 	if err == nil && t.handler.Initialized != nil {
 		t.handler.Initialized(ctx, caps)

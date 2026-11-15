@@ -27,6 +27,8 @@ type acpOptions struct {
 	APIKey        string
 	// MaxPromptDuration cancels a prompt that runs longer.
 	MaxPromptDuration time.Duration
+	// Steering advertises mid-turn steering to the client.
+	Steering bool
 }
 
 type resolvedACPOptions struct {
@@ -65,6 +67,8 @@ func acpCmd() *cobra.Command {
 	command.Flags().StringVar(&options.APIKey, "api-key", "", "ACP-specific Gateway API key")
 	command.Flags().DurationVar(&options.MaxPromptDuration, "max-prompt-duration", acpserver.MaxPromptDurationDefault,
 		fmt.Sprintf("cancel a prompt that runs longer than this (%s to %s)", acpserver.MaxPromptDurationMin, acpserver.MaxPromptDurationMax))
+	command.Flags().BoolVar(&options.Steering, "steering", true,
+		"accept follow-up messages into a running turn (false: the client cancels and merges instead)")
 	for _, name := range []string{"agent", "owner", "tenant", "workspace-root", "mcp-exec-root"} {
 		if err := command.MarkFlagRequired(name); err != nil {
 			panic(err)
@@ -174,6 +178,7 @@ func newACPServer(ctx context.Context, options resolvedACPOptions) (acpRuntime, 
 		Gateway: gateway, AgentID: options.Agent, WorkspaceRoot: options.WorkspaceRoot,
 		MCPExecRoots: options.MCPExecRoots, Version: Version,
 		MaxPromptDuration: options.MaxPromptDuration,
+		Steering:          options.Steering,
 	})
 	if err != nil {
 		return nil, errors.Join(err, gateway.Close())

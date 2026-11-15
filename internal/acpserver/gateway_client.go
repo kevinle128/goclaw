@@ -117,6 +117,28 @@ func (c *GatewayClient) ChatSend(ctx context.Context, request ChatSendRequest) (
 	return response, err
 }
 
+// ChatSteerRequest is the chat.steer request: a message for the run that is
+// active on a session.
+type ChatSteerRequest struct {
+	SessionKey string `json:"sessionKey"`
+	Message    string `json:"message"`
+}
+
+// ChatSteerResponse is the chat.steer response.
+type ChatSteerResponse struct {
+	Injected bool   `json:"injected"`
+	RunID    string `json:"runId,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// ChatSteer injects a message into the running turn of a session. It never
+// starts a run, and it answers when the message is queued.
+func (c *GatewayClient) ChatSteer(ctx context.Context, request ChatSteerRequest) (ChatSteerResponse, error) {
+	var response ChatSteerResponse
+	err := c.Call(ctx, protocol.MethodChatSteer, request, &response)
+	return response, err
+}
+
 func (c *GatewayClient) ChatAbort(ctx context.Context, request ChatAbortRequest) error {
 	return c.Call(ctx, protocol.MethodChatAbort, request, nil)
 }

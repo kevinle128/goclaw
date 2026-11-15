@@ -29,6 +29,8 @@ The command does not read `--token`, `GOCLAW_GATEWAY_TOKEN`, or the Gateway toke
 `--max-prompt-duration` sets the time after which the adapter cancels a running prompt.
 The default is `2h`. The value must be from `1m` to `168h`, otherwise the command stops with an error.
 
+`--steering` (default `true`) lets a follow-up message join the running turn (see "Steering"). With `--steering=false`, `initialize` does not advertise steering and the client cancels the turn and merges the messages instead.
+
 ## ACP compatibility
 
 The server implements ACP version 1.
@@ -42,12 +44,26 @@ It does not support `session/load`, client-driven session release, image or audi
 ### Capabilities
 
 The `initialize` result advertises `agentCapabilities._meta["buzz.wake"] = {"version": 1}` and `agentCapabilities._meta["buzz.turnAbort"] = {"version": 1}`. A client does not need to support `buzz.turnAbort`.
+With `--steering` on, it also sets `_meta.steering.supported = true` at the ROOT of the result (next to `agentCapabilities`, not inside it). Buzz reads exactly that path.
 The adapter reads these client capabilities from the `initialize` request:
 
 - Wake: only when `clientCapabilities._meta["buzz.wake"]` is an object with `version` equal to the number `1`. Any other value means that the client does not support wake requests.
 - Elicitation form or URL mode: only when `clientCapabilities.elicitation.form` (or `.url`) is present and not `null`. `{}` and `{"form": null}` do not enable form mode.
 
 A malformed capability value is treated as not supported. It does not fail `initialize`.
+
+### Steering
+
+`_session/steering` adds a follow-up message to the turn that is running on a session, so the client does not need to cancel the turn and open a new session.
+
+Request (a JSON-RPC request with an id): `{"sessionId": "...", "prompt": [{"type": "text", "text": "..."}]}`. The params are checked like a prompt: a session id, at least one block, every block `type: "text"` with non-empty text, and the same total size limit. A bad shape gives `-32602`; an unknown session gives `-32002`. The text is passed on unchanged; the adapter adds no wrapper.
+
+Answers:
+
+- `{"outcome": "injected"}`: the Gateway queued the message into the running turn through `chat.steer` ([19 — WebSocket RPC](19-websocket-rpc.md)). The turn keeps running. The model reads the message after the current tool batch, as a user message after the tool results, or right after its final answer, which then continues in the same run.
+- Error `-32003` (`Steering not applied`): the session has no running prompt, the Gateway did not accept the message (`no_active_run`, `inject_full`), the Gateway call failed, or the Gateway is older and has no `chat.steer`. The turn is not touched. Buzz keeps the turn and runs the message after it.
+
+The adapter never answers `startedNewTurn`, never answers `-32601` for a known session, and never answers with a result that has no `outcome`; Buzz would cancel the turn and merge in those cases. It answers when the message is queued, not when the model reads it, so a client with one steer in flight is not held up.
 
 ### Turn abort
 
