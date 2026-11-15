@@ -138,6 +138,11 @@ type PipelineDeps struct {
 	// Checkpoint callbacks (CheckpointStage)
 	FlushMessages func(ctx context.Context, sessionKey string, msgs []providers.Message) error
 
+	// RecordRuntimeContext receives the runtime block that stays on the
+	// current-turn user message (StablePromptPrefix only; "" when none), so the
+	// caller can persist the user message exactly as it was sent to the model.
+	RecordRuntimeContext func(block string)
+
 	// Finalize callbacks (FinalizeStage)
 	// PersistAssistantImages writes final (non-partial) images from the assistant
 	// response to workspace disk, appends MediaRefs, and clears inline base64.
@@ -185,7 +190,9 @@ type PipelineConfig struct {
 
 	// StablePromptPrefix keeps per-turn content (runtime context, L0 memory)
 	// out of the system message: it goes into the current-turn user message
-	// request instead, so the system prefix stays byte-stable across runs.
+	// instead, so the system prefix stays byte-stable across runs. The session
+	// stores that message with its block, and a block identical to the last one
+	// in history is not sent again.
 	// Default false keeps the previous layout.
 	StablePromptPrefix bool
 

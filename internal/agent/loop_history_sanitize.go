@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/pipeline"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/safego"
 )
@@ -259,7 +260,7 @@ func (l *Loop) maybeSummarize(ctx context.Context, sessionKey string) {
 		var mediaKinds []string
 		for _, m := range toSummarize {
 			if m.Role == "user" {
-				sb.WriteString(fmt.Sprintf("user: %s\n", m.Content))
+				sb.WriteString(fmt.Sprintf("user: %s\n", pipeline.StripRuntimeContext(m.Content)))
 			} else if m.Role == "assistant" {
 				sb.WriteString(fmt.Sprintf("assistant: %s\n", SanitizeAssistantContent(m.Content)))
 			}

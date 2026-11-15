@@ -181,6 +181,16 @@ func (s *ContextStage) Execute(ctx context.Context, state *RunState) error {
 		}
 	}
 
+	// 9. Stable prefix: send the runtime block only when it changed since the
+	// last one stored in history, and tell the caller which block was sent so
+	// the session stores the user message exactly as the model saw it.
+	if s.deps.Config.StablePromptPrefix {
+		sent := settleRuntimeContext(state)
+		if s.deps.RecordRuntimeContext != nil {
+			s.deps.RecordRuntimeContext(sent)
+		}
+	}
+
 	return nil
 }
 

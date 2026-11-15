@@ -630,6 +630,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 type RunRequest struct {
 	SessionKey         string             // composite key: agent:{agentId}:{channel}:{peerKind}:{chatId}
 	Message            string             // user message
+	runtimeContext     string             // runtime block sent in front of Message (stable prefix only); stored with the message
 	Media              []bus.MediaFile    // local media files with MIME types
 	ForwardMedia       []bus.MediaFile    // media files to forward to output (from delegation results)
 	Channel            string             // source channel instance name (e.g. "my-telegram-bot")
